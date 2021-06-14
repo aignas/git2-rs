@@ -309,6 +309,7 @@ impl Diff<'static> {
     /// a patch file likely contains abbreviated object IDs, so the
     /// object IDs parsed by this function will also be abreviated.
     pub fn from_buffer(buffer: &[u8]) -> Result<Diff<'static>, Error> {
+        crate::init();
         let mut diff: *mut raw::git_diff = std::ptr::null_mut();
         unsafe {
             // NOTE: Doesn't depend on repo, so lifetime can be 'static
@@ -446,7 +447,7 @@ impl<'repo> Binding for Diff<'repo> {
     type Raw = *mut raw::git_diff;
     unsafe fn from_raw(raw: *mut raw::git_diff) -> Diff<'repo> {
         Diff {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -544,7 +545,7 @@ impl<'a> Binding for DiffDelta<'a> {
     type Raw = *mut raw::git_diff_delta;
     unsafe fn from_raw(raw: *mut raw::git_diff_delta) -> DiffDelta<'a> {
         DiffDelta {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -629,7 +630,7 @@ impl<'a> Binding for DiffFile<'a> {
     type Raw = *const raw::git_diff_file;
     unsafe fn from_raw(raw: *const raw::git_diff_file) -> DiffFile<'a> {
         DiffFile {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -1080,7 +1081,7 @@ impl<'a> Binding for DiffLine<'a> {
     type Raw = *const raw::git_diff_line;
     unsafe fn from_raw(raw: *const raw::git_diff_line) -> DiffLine<'a> {
         DiffLine {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -1142,7 +1143,7 @@ impl<'a> Binding for DiffHunk<'a> {
     type Raw = *const raw::git_diff_hunk;
     unsafe fn from_raw(raw: *const raw::git_diff_hunk) -> DiffHunk<'a> {
         DiffHunk {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -1198,7 +1199,7 @@ impl Binding for DiffStats {
     type Raw = *mut raw::git_diff_stats;
 
     unsafe fn from_raw(raw: *mut raw::git_diff_stats) -> DiffStats {
-        DiffStats { raw: raw }
+        DiffStats { raw }
     }
     fn raw(&self) -> *mut raw::git_diff_stats {
         self.raw
@@ -1247,7 +1248,7 @@ impl<'a> Binding for DiffBinary<'a> {
     type Raw = *const raw::git_diff_binary;
     unsafe fn from_raw(raw: *const raw::git_diff_binary) -> DiffBinary<'a> {
         DiffBinary {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -1279,7 +1280,7 @@ impl<'a> Binding for DiffBinaryFile<'a> {
     type Raw = *const raw::git_diff_binary_file;
     unsafe fn from_raw(raw: *const raw::git_diff_binary_file) -> DiffBinaryFile<'a> {
         DiffBinaryFile {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
