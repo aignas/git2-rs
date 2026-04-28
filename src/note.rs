@@ -53,7 +53,7 @@ impl<'repo> Binding for Note<'repo> {
     type Raw = *mut raw::git_note;
     unsafe fn from_raw(raw: *mut raw::git_note) -> Note<'repo> {
         Note {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -80,7 +80,7 @@ impl<'repo> Binding for Notes<'repo> {
     type Raw = *mut raw::git_note_iterator;
     unsafe fn from_raw(raw: *mut raw::git_note_iterator) -> Notes<'repo> {
         Notes {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -92,9 +92,7 @@ impl<'repo> Binding for Notes<'repo> {
 impl<'repo> Iterator for Notes<'repo> {
     type Item = Result<(Oid, Oid), Error>;
     fn next(&mut self) -> Option<Result<(Oid, Oid), Error>> {
-        let mut note_id = raw::git_oid {
-            id: [0; raw::GIT_OID_RAWSZ],
-        };
+        let mut note_id = crate::util::zeroed_raw_oid();
         let mut annotated_id = note_id;
         unsafe {
             try_call_iter!(raw::git_note_next(

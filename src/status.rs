@@ -1,5 +1,6 @@
 use libc::{c_char, c_uint, size_t};
 use std::ffi::CString;
+use std::iter::FusedIterator;
 use std::marker;
 use std::mem;
 use std::ops::Range;
@@ -72,7 +73,7 @@ impl StatusOptions {
             let r = raw::git_status_init_options(&mut raw, raw::GIT_STATUS_OPTIONS_VERSION);
             assert_eq!(r, 0);
             StatusOptions {
-                raw: raw,
+                raw,
                 pathspec: Vec::new(),
                 ptrs: Vec::new(),
             }
@@ -150,7 +151,7 @@ impl StatusOptions {
         self.flag(raw::GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS, include)
     }
 
-    /// Indicates that the given paths should be treated as literals paths, note
+    /// Indicates that the given paths should be treated as literals paths, not
     /// patterns.
     pub fn disable_pathspec_match(&mut self, include: bool) -> &mut StatusOptions {
         self.flag(raw::GIT_STATUS_OPT_DISABLE_PATHSPEC_MATCH, include)
@@ -216,6 +217,14 @@ impl StatusOptions {
         self.flag(raw::GIT_STATUS_OPT_INCLUDE_UNREADABLE_AS_UNTRACKED, include)
     }
 
+    /// Set threshold above which similar files will be considered renames.
+    ///
+    /// This is equivalent to the `-M` option. Defaults to 50.
+    pub fn rename_threshold(&mut self, threshold: u16) -> &mut StatusOptions {
+        self.raw.rename_threshold = threshold;
+        self
+    }
+
     /// Get a pointer to the inner list of status options.
     ///
     /// This function is unsafe as the returned structure has interior pointers
@@ -264,7 +273,7 @@ impl<'repo> Binding for Statuses<'repo> {
     type Raw = *mut raw::git_status_list;
     unsafe fn from_raw(raw: *mut raw::git_status_list) -> Statuses<'repo> {
         Statuses {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -295,7 +304,16 @@ impl<'a> DoubleEndedIterator for StatusIter<'a> {
         self.range.next_back().and_then(|i| self.statuses.get(i))
     }
 }
+impl<'a> FusedIterator for StatusIter<'a> {}
 impl<'a> ExactSizeIterator for StatusIter<'a> {}
+
+impl<'a> IntoIterator for &'a Statuses<'a> {
+    type Item = StatusEntry<'a>;
+    type IntoIter = StatusIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
 
 impl<'statuses> StatusEntry<'statuses> {
     /// Access the bytes for this entry's corresponding pathname
@@ -340,7 +358,7 @@ impl<'statuses> Binding for StatusEntry<'statuses> {
 
     unsafe fn from_raw(raw: *const raw::git_status_entry) -> StatusEntry<'statuses> {
         StatusEntry {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }

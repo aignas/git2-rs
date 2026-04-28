@@ -31,7 +31,7 @@ pub fn repo_init() -> (TempDir, Repository) {
 
         let tree = repo.find_tree(id).unwrap();
         let sig = repo.signature().unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+        repo.commit(Some("HEAD"), &sig, &sig, "initial\n\nbody", &tree, &[])
             .unwrap();
     }
     (td, repo)
@@ -66,7 +66,7 @@ pub fn worktrees_env_init(repo: &Repository) -> (TempDir, Branch<'_>) {
 
 #[cfg(windows)]
 pub fn realpath(original: &Path) -> io::Result<PathBuf> {
-    Ok(original.to_path_buf())
+    Ok(original.canonicalize()?.to_path_buf())
 }
 #[cfg(unix)]
 pub fn realpath(original: &Path) -> io::Result<PathBuf> {

@@ -1,4 +1,5 @@
 use libc::size_t;
+use std::iter::FusedIterator;
 use std::marker;
 use std::ops::Range;
 use std::str;
@@ -103,7 +104,7 @@ impl Binding for Reflog {
     type Raw = *mut raw::git_reflog;
 
     unsafe fn from_raw(raw: *mut raw::git_reflog) -> Reflog {
-        Reflog { raw: raw }
+        Reflog { raw }
     }
     fn raw(&self) -> *mut raw::git_reflog {
         self.raw
@@ -151,7 +152,7 @@ impl<'reflog> Binding for ReflogEntry<'reflog> {
 
     unsafe fn from_raw(raw: *const raw::git_reflog_entry) -> ReflogEntry<'reflog> {
         ReflogEntry {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -174,6 +175,7 @@ impl<'reflog> DoubleEndedIterator for ReflogIter<'reflog> {
         self.range.next_back().and_then(|i| self.reflog.get(i))
     }
 }
+impl<'reflog> FusedIterator for ReflogIter<'reflog> {}
 impl<'reflog> ExactSizeIterator for ReflogIter<'reflog> {}
 
 #[cfg(test)]

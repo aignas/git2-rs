@@ -56,7 +56,7 @@ impl<'repo> Binding for Blob<'repo> {
 
     unsafe fn from_raw(raw: *mut raw::git_blob) -> Blob<'repo> {
         Blob {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -95,9 +95,7 @@ impl<'repo> BlobWriter<'repo> {
     pub fn commit(mut self) -> Result<Oid, Error> {
         // After commit we already doesn't need cleanup on drop
         self.need_cleanup = false;
-        let mut raw = raw::git_oid {
-            id: [0; raw::GIT_OID_RAWSZ],
-        };
+        let mut raw = crate::util::zeroed_raw_oid();
         unsafe {
             try_call!(raw::git_blob_create_fromstream_commit(&mut raw, self.raw));
             Ok(Binding::from_raw(&raw as *const _))
@@ -110,7 +108,7 @@ impl<'repo> Binding for BlobWriter<'repo> {
 
     unsafe fn from_raw(raw: *mut raw::git_writestream) -> BlobWriter<'repo> {
         BlobWriter {
-            raw: raw,
+            raw,
             need_cleanup: true,
             _marker: marker::PhantomData,
         }

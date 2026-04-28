@@ -165,6 +165,12 @@ impl<'a> WorktreeAddOptions<'a> {
         self
     }
 
+    /// If enabled, this will checkout the existing branch matching the worktree name.
+    pub fn checkout_existing(&mut self, enabled: bool) -> &mut WorktreeAddOptions<'a> {
+        self.raw.checkout_existing = enabled as c_int;
+        self
+    }
+
     /// reference to use for the new worktree HEAD
     pub fn reference(
         &mut self,
@@ -218,7 +224,7 @@ impl WorktreePruneOptions {
         self.flag(raw::GIT_WORKTREE_PRUNE_LOCKED, locked)
     }
 
-    /// Controls whether the actual working tree on the fs is recursively removed
+    /// Controls whether the actual working tree on the filesystem is recursively removed
     ///
     /// Defaults to false
     pub fn working_tree(&mut self, working_tree: bool) -> &mut WorktreePruneOptions {

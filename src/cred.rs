@@ -1,14 +1,14 @@
+#[cfg(feature = "cred")]
 use log::{debug, trace};
 use std::ffi::CString;
-use std::io::Write;
 use std::mem;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::ptr;
-use url;
 
 use crate::util::Binding;
-use crate::{raw, Config, Error, IntoCString};
+#[cfg(feature = "cred")]
+use crate::Config;
+use crate::{raw, Error, IntoCString};
 
 /// A structure to represent git credentials in libgit2.
 pub struct Cred {
@@ -16,6 +16,7 @@ pub struct Cred {
 }
 
 /// Management of the gitcredentials(7) interface.
+#[cfg(feature = "cred")]
 pub struct CredentialHelper {
     /// A public field representing the currently discovered username from
     /// configuration.
@@ -113,12 +114,13 @@ impl Cred {
     ///
     /// This function will attempt to parse the user's `credential.helper`
     /// configuration, invoke the necessary processes, and read off what the
-    /// username/password should be for a particular url.
+    /// username/password should be for a particular URL.
     ///
     /// The returned credential type will be a username/password credential if
     /// successful.
     ///
     /// [1]: https://www.kernel.org/pub/software/scm/git/docs/gitcredentials.html
+    #[cfg(feature = "cred")]
     pub fn credential_helper(
         config: &Config,
         url: &str,
@@ -140,7 +142,7 @@ impl Cred {
     /// Create a credential to specify a username.
     ///
     /// This is used with ssh authentication to query for the username if none is
-    /// specified in the url.
+    /// specified in the URL.
     pub fn username(username: &str) -> Result<Cred, Error> {
         crate::init();
         let username = CString::new(username)?;
@@ -171,7 +173,7 @@ impl Binding for Cred {
     type Raw = *mut raw::git_cred;
 
     unsafe fn from_raw(raw: *mut raw::git_cred) -> Cred {
-        Cred { raw: raw }
+        Cred { raw }
     }
     fn raw(&self) -> *mut raw::git_cred {
         self.raw
@@ -190,12 +192,13 @@ impl Drop for Cred {
     }
 }
 
+#[cfg(feature = "cred")]
 impl CredentialHelper {
     /// Create a new credential helper object which will be used to probe git's
     /// local credential configuration.
     ///
-    /// The url specified is the namespace on which this will query credentials.
-    /// Invalid urls are currently ignored.
+    /// The URL specified is the namespace on which this will query credentials.
+    /// Invalid URLs are currently ignored.
     pub fn new(url: &str) -> CredentialHelper {
         let mut ret = CredentialHelper {
             protocol: None,
@@ -293,6 +296,12 @@ impl CredentialHelper {
     // see https://www.kernel.org/pub/software/scm/git/docs/technical
     //                           /api-credentials.html#_credential_helpers
     fn add_command(&mut self, cmd: Option<&str>) {
+        fn is_absolute_path(path: &str) -> bool {
+            path.starts_with('/')
+                || path.starts_with('\\')
+                || cfg!(windows) && path.chars().nth(1).is_some_and(|x| x == ':')
+        }
+
         let cmd = match cmd {
             Some("") | None => return,
             Some(s) => s,
@@ -300,7 +309,7 @@ impl CredentialHelper {
 
         if cmd.starts_with('!') {
             self.commands.push(cmd[1..].to_string());
-        } else if cmd.contains("/") || cmd.contains("\\") {
+        } else if is_absolute_path(cmd) {
             self.commands.push(cmd.to_string());
         } else {
             self.commands.push(format!("git credential-{}", cmd));
@@ -353,6 +362,9 @@ impl CredentialHelper {
         cmd: &str,
         username: &Option<String>,
     ) -> (Option<String>, Option<String>) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
         macro_rules! my_try( ($e:expr) => (
             match $e {
                 Ok(e) => e,
@@ -373,6 +385,12 @@ impl CredentialHelper {
         // If that fails then it's up to the user to put `sh` in path and make
         // sure it works.
         let mut c = Command::new("sh");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            c.creation_flags(CREATE_NO_WINDOW);
+        }
         c.arg("-c")
             .arg(&format!("{} get", cmd))
             .stdin(Stdio::piped())
@@ -385,6 +403,12 @@ impl CredentialHelper {
                 debug!("`sh` failed to spawn: {}", e);
                 let mut parts = cmd.split_whitespace();
                 let mut c = Command::new(parts.next().unwrap());
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    const CREATE_NO_WINDOW: u32 = 0x08000000;
+                    c.creation_flags(CREATE_NO_WINDOW);
+                }
                 for arg in parts {
                     c.arg(arg);
                 }
@@ -427,7 +451,7 @@ impl CredentialHelper {
         let output = my_try!(p.wait_with_output());
         if !output.status.success() {
             debug!(
-                "credential helper failed: {}\nstdout ---\n{}\nstdout ---\n{}",
+                "credential helper failed: {}\nstdout ---\n{}\nstderr ---\n{}",
                 output.status,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
@@ -471,6 +495,7 @@ impl CredentialHelper {
 }
 
 #[cfg(test)]
+#[cfg(feature = "cred")]
 mod test {
     use std::env;
     use std::fs::File;
@@ -483,7 +508,7 @@ mod test {
     macro_rules! test_cfg( ($($k:expr => $v:expr),*) => ({
         let td = TempDir::new().unwrap();
         let mut cfg = Config::new().unwrap();
-        cfg.add_file(&td.path().join("cfg"), ConfigLevel::Highest, false).unwrap();
+        cfg.add_file(&td.path().join("cfg"), ConfigLevel::App, false).unwrap();
         $(cfg.set_str($k, $v).unwrap();)*
         cfg
     }) );
@@ -567,13 +592,13 @@ echo username=c
             return;
         } // shell scripts don't work on Windows
         let td = TempDir::new().unwrap();
-        let path = td.path().join("git-credential-script");
+        let path = td.path().join("git-credential-some-script");
         File::create(&path)
             .unwrap()
             .write(
                 br"\
 #!/bin/sh
-echo username=c
+echo username=$1
 ",
             )
             .unwrap();
@@ -585,14 +610,14 @@ echo username=c
         env::set_var("PATH", &env::join_paths(paths).unwrap());
 
         let cfg = test_cfg! {
-            "credential.https://example.com.helper" => "script",
+            "credential.https://example.com.helper" => "some-script \"value/with\\slashes\"",
             "credential.helper" => "!f() { echo username=a; echo password=b; }; f"
         };
         let (u, p) = CredentialHelper::new("https://example.com/foo/bar")
             .config(&cfg)
             .execute()
             .unwrap();
-        assert_eq!(u, "c");
+        assert_eq!(u, "value/with\\slashes");
         assert_eq!(p, "b");
     }
 

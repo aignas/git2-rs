@@ -25,7 +25,7 @@ pub struct Transport {
 
 /// Interface used by smart transports.
 ///
-/// The full-fledged definiton of transports has to deal with lots of
+/// The full-fledged definition of transports has to deal with lots of
 /// nitty-gritty details of the git protocol, but "smart transports" largely
 /// only need to deal with read() and write() of data over a channel.
 ///
@@ -54,7 +54,7 @@ pub trait SmartSubtransport: Send + 'static {
 }
 
 /// Actions that a smart transport can ask a subtransport to perform
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 #[allow(missing_docs)]
 pub enum Service {
     UploadPackLs,
@@ -251,7 +251,7 @@ extern "C" fn subtransport_action(
             n => panic!("unknown action: {}", n),
         };
 
-        let mut transport = &mut *(raw_transport as *mut RawSmartSubtransport);
+        let transport = &mut *(raw_transport as *mut RawSmartSubtransport);
         // Note: we only need to generate if rpc is on. Else, for receive-pack and upload-pack
         // libgit2 reuses the stream generated for receive-pack-ls or upload-pack-ls.
         let generate_stream =
@@ -259,10 +259,7 @@ extern "C" fn subtransport_action(
         if generate_stream {
             let obj = match transport.obj.action(url, action) {
                 Ok(s) => s,
-                Err(e) => {
-                    set_err(&e);
-                    return e.raw_code() as c_int;
-                }
+                Err(e) => return e.raw_set_git_error(),
             };
             *stream = mem::transmute(Box::new(RawSmartSubtransportStream {
                 raw: raw::git_smart_subtransport_stream {
@@ -271,7 +268,7 @@ extern "C" fn subtransport_action(
                     write: Some(stream_write),
                     free: Some(stream_free),
                 },
-                obj: obj,
+                obj,
             }));
             transport.stream = Some(*stream);
         } else {
@@ -361,11 +358,6 @@ extern "C" fn stream_write(
 unsafe fn set_err_io(e: &io::Error) {
     let s = CString::new(e.to_string()).unwrap();
     raw::git_error_set_str(raw::GIT_ERROR_NET as c_int, s.as_ptr());
-}
-
-unsafe fn set_err(e: &Error) {
-    let s = CString::new(e.message()).unwrap();
-    raw::git_error_set_str(e.raw_class() as c_int, s.as_ptr());
 }
 
 // callback used by smart transports to free a `SmartSubtransportStream`

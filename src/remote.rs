@@ -1,16 +1,18 @@
-use libc;
-use std::ffi::CString;
+use raw::git_strarray;
+use std::iter::FusedIterator;
 use std::marker;
 use std::mem;
 use std::ops::Range;
+use std::os::raw::c_uint;
 use std::ptr;
 use std::slice;
 use std::str;
+use std::{ffi::CString, os::raw::c_char};
 
 use crate::string_array::StringArray;
 use crate::util::Binding;
-use crate::{raw, Buf, Direction, Error, FetchPrune, Oid, ProxyOptions, Refspec};
-use crate::{AutotagOption, Progress, RemoteCallbacks, Repository};
+use crate::{call, raw, Buf, Direction, Error, FetchPrune, Oid, ProxyOptions, Refspec};
+use crate::{AutotagOption, Progress, RemoteCallbacks, RemoteUpdateFlags, Repository};
 
 /// A structure representing a [remote][1] of a git repository.
 ///
@@ -39,10 +41,14 @@ pub struct RemoteHead<'remote> {
 /// Options which can be specified to various fetch operations.
 pub struct FetchOptions<'cb> {
     callbacks: Option<RemoteCallbacks<'cb>>,
+    depth: i32,
     proxy: Option<ProxyOptions<'cb>>,
     prune: FetchPrune,
-    update_fetchhead: bool,
+    update_flags: RemoteUpdateFlags,
     download_tags: AutotagOption,
+    follow_redirects: RemoteRedirect,
+    custom_headers: Vec<CString>,
+    custom_headers_ptrs: Vec<*const c_char>,
 }
 
 /// Options to control the behavior of a git push.
@@ -50,6 +56,11 @@ pub struct PushOptions<'cb> {
     callbacks: Option<RemoteCallbacks<'cb>>,
     proxy: Option<ProxyOptions<'cb>>,
     pb_parallelism: u32,
+    follow_redirects: RemoteRedirect,
+    custom_headers: Vec<CString>,
+    custom_headers_ptrs: Vec<*const c_char>,
+    remote_push_options: Vec<CString>,
+    remote_push_options_ptrs: Vec<*const c_char>,
 }
 
 /// Holds callbacks for a connection to a `Remote`. Disconnects when dropped
@@ -59,10 +70,25 @@ pub struct RemoteConnection<'repo, 'connection, 'cb> {
     remote: &'connection mut Remote<'repo>,
 }
 
+/// Remote redirection settings; whether redirects to another host are
+/// permitted.
+///
+/// By default, git will follow a redirect on the initial request
+/// (`/info/refs`), but not subsequent requests.
+pub enum RemoteRedirect {
+    /// Do not follow any off-site redirects at any stage of the fetch or push.
+    None,
+    /// Allow off-site redirects only upon the initial request. This is the
+    /// default.
+    Initial,
+    /// Allow redirects at any stage in the fetch or push.
+    All,
+}
+
 pub fn remote_into_raw(remote: Remote<'_>) -> *mut raw::git_remote {
     let ret = remote.raw;
     mem::forget(remote);
-    return ret;
+    ret
 }
 
 impl<'repo> Remote<'repo> {
@@ -70,16 +96,24 @@ impl<'repo> Remote<'repo> {
     pub fn is_valid_name(remote_name: &str) -> bool {
         crate::init();
         let remote_name = CString::new(remote_name).unwrap();
-        unsafe { raw::git_remote_is_valid_name(remote_name.as_ptr()) == 1 }
+        let mut valid: libc::c_int = 0;
+        unsafe {
+            call::c_try(raw::git_remote_name_is_valid(
+                &mut valid,
+                remote_name.as_ptr(),
+            ))
+            .unwrap();
+        }
+        valid == 1
     }
 
     /// Create a detached remote
     ///
-    /// Create a remote with the given url in-memory. You can use this
+    /// Create a remote with the given URL in-memory. You can use this
     /// when you have a URL instead of a remote's name.
     /// Contrasted with an anonymous remote, a detached remote will not
     /// consider any repo configuration values.
-    pub fn create_detached(url: &str) -> Result<Remote<'_>, Error> {
+    pub fn create_detached<S: Into<Vec<u8>>>(url: S) -> Result<Remote<'repo>, Error> {
         crate::init();
         let mut ret = ptr::null_mut();
         let url = CString::new(url)?;
@@ -104,26 +138,28 @@ impl<'repo> Remote<'repo> {
         unsafe { crate::opt_bytes(self, raw::git_remote_name(&*self.raw)) }
     }
 
-    /// Get the remote's url.
+    /// Get the remote's URL.
     ///
-    /// Returns `None` if the url is not valid utf-8
+    /// Returns `None` if the URL is not valid utf-8
     pub fn url(&self) -> Option<&str> {
         str::from_utf8(self.url_bytes()).ok()
     }
 
-    /// Get the remote's url as a byte array.
+    /// Get the remote's URL as a byte array.
     pub fn url_bytes(&self) -> &[u8] {
-        unsafe { crate::opt_bytes(self, raw::git_remote_url(&*self.raw)).unwrap() }
+        unsafe { crate::opt_bytes(self, raw::git_remote_url(&*self.raw)).unwrap_or(&[]) }
     }
 
     /// Get the remote's pushurl.
     ///
-    /// Returns `None` if the pushurl is not valid utf-8
+    /// Returns `None` if the pushurl is not valid utf-8 or no special url for pushing is set.
     pub fn pushurl(&self) -> Option<&str> {
         self.pushurl_bytes().and_then(|s| str::from_utf8(s).ok())
     }
 
     /// Get the remote's pushurl as a byte array.
+    ///
+    /// Returns `None` if no special url for pushing is set.
     pub fn pushurl_bytes(&self) -> Option<&[u8]> {
         unsafe { crate::opt_bytes(self, raw::git_remote_pushurl(&*self.raw)) }
     }
@@ -224,7 +260,7 @@ impl<'repo> Remote<'repo> {
     /// Cancel the operation
     ///
     /// At certain points in its operation, the network code checks whether the
-    /// operation has been cancelled and if so stops the operation.
+    /// operation has been canceled and if so stops the operation.
     pub fn stop(&mut self) -> Result<(), Error> {
         unsafe {
             try_call!(raw::git_remote_stop(self.raw));
@@ -258,7 +294,7 @@ impl<'repo> Remote<'repo> {
     ///
     /// # Examples
     ///
-    /// Example of functionality similar to `git fetch origin/main`:
+    /// Example of functionality similar to `git fetch origin main`:
     ///
     /// ```no_run
     /// fn fetch_origin_main(repo: git2::Repository) -> Result<(), git2::Error> {
@@ -287,7 +323,7 @@ impl<'repo> Remote<'repo> {
     pub fn update_tips(
         &mut self,
         callbacks: Option<&mut RemoteCallbacks<'_>>,
-        update_fetchhead: bool,
+        update_flags: RemoteUpdateFlags,
         download_tags: AutotagOption,
         msg: Option<&str>,
     ) -> Result<(), Error> {
@@ -297,7 +333,7 @@ impl<'repo> Remote<'repo> {
             try_call!(raw::git_remote_update_tips(
                 self.raw,
                 cbs.as_ref(),
-                update_fetchhead,
+                update_flags.bits() as c_uint,
                 download_tags,
                 msg
             ));
@@ -401,7 +437,7 @@ impl<'repo> Binding for Remote<'repo> {
 
     unsafe fn from_raw(raw: *mut raw::git_remote) -> Remote<'repo> {
         Remote {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -432,6 +468,7 @@ impl<'repo> DoubleEndedIterator for Refspecs<'repo> {
             .and_then(|i| self.remote.get_refspec(i))
     }
 }
+impl<'repo> FusedIterator for Refspecs<'repo> {}
 impl<'repo> ExactSizeIterator for Refspecs<'repo> {}
 
 #[allow(missing_docs)] // not documented in libgit2 :(
@@ -472,8 +509,12 @@ impl<'cb> FetchOptions<'cb> {
             callbacks: None,
             proxy: None,
             prune: FetchPrune::Unspecified,
-            update_fetchhead: true,
+            update_flags: RemoteUpdateFlags::UPDATE_FETCHHEAD,
             download_tags: AutotagOption::Unspecified,
+            follow_redirects: RemoteRedirect::Initial,
+            custom_headers: Vec::new(),
+            custom_headers_ptrs: Vec::new(),
+            depth: 0, // Not limited depth
         }
     }
 
@@ -499,7 +540,28 @@ impl<'cb> FetchOptions<'cb> {
     ///
     /// Defaults to `true`.
     pub fn update_fetchhead(&mut self, update: bool) -> &mut Self {
-        self.update_fetchhead = update;
+        self.update_flags
+            .set(RemoteUpdateFlags::UPDATE_FETCHHEAD, update);
+        self
+    }
+
+    /// Set whether to report unchanged tips in the update_tips callback.
+    ///
+    /// Defaults to `false`.
+    pub fn report_unchanged(&mut self, update: bool) -> &mut Self {
+        self.update_flags
+            .set(RemoteUpdateFlags::REPORT_UNCHANGED, update);
+        self
+    }
+
+    /// Set fetch depth, a value less or equal to 0 is interpreted as pull
+    /// everything (effectively the same as not declaring a limit depth).
+
+    // FIXME(blyxyas): We currently don't have a test for shallow functions
+    // because libgit2 doesn't support local shallow clones.
+    // https://github.com/rust-lang/git2-rs/pull/979#issuecomment-1716299900
+    pub fn depth(&mut self, depth: i32) -> &mut Self {
+        self.depth = depth.max(0);
         self
     }
 
@@ -509,6 +571,26 @@ impl<'cb> FetchOptions<'cb> {
     /// The default is to auto-follow tags.
     pub fn download_tags(&mut self, opt: AutotagOption) -> &mut Self {
         self.download_tags = opt;
+        self
+    }
+
+    /// Set remote redirection settings; whether redirects to another host are
+    /// permitted.
+    ///
+    /// By default, git will follow a redirect on the initial request
+    /// (`/info/refs`), but not subsequent requests.
+    pub fn follow_redirects(&mut self, redirect: RemoteRedirect) -> &mut Self {
+        self.follow_redirects = redirect;
+        self
+    }
+
+    /// Set extra headers for this fetch operation.
+    pub fn custom_headers(&mut self, custom_headers: &[&str]) -> &mut Self {
+        self.custom_headers = custom_headers
+            .iter()
+            .map(|&s| CString::new(s).unwrap())
+            .collect();
+        self.custom_headers_ptrs = self.custom_headers.iter().map(|s| s.as_ptr()).collect();
         self
     }
 }
@@ -533,12 +615,16 @@ impl<'cb> Binding for FetchOptions<'cb> {
                 .map(|m| m.raw())
                 .unwrap_or_else(|| ProxyOptions::new().raw()),
             prune: crate::call::convert(&self.prune),
-            update_fetchhead: crate::call::convert(&self.update_fetchhead),
+            // `update_fetchhead` is an incorrectly named option which contains both
+            // the `UPDATE_FETCHHEAD` and `REPORT_UNCHANGED` flags.
+            // See https://github.com/libgit2/libgit2/pull/6806
+            update_fetchhead: self.update_flags.bits() as c_uint,
             download_tags: crate::call::convert(&self.download_tags),
-            // TODO: expose this as a builder option
-            custom_headers: raw::git_strarray {
-                count: 0,
-                strings: ptr::null_mut(),
+            depth: self.depth,
+            follow_redirects: self.follow_redirects.raw(),
+            custom_headers: git_strarray {
+                count: self.custom_headers_ptrs.len(),
+                strings: self.custom_headers_ptrs.as_ptr() as *mut _,
             },
         }
     }
@@ -557,16 +643,21 @@ impl<'cb> PushOptions<'cb> {
             callbacks: None,
             proxy: None,
             pb_parallelism: 1,
+            follow_redirects: RemoteRedirect::Initial,
+            custom_headers: Vec::new(),
+            custom_headers_ptrs: Vec::new(),
+            remote_push_options: Vec::new(),
+            remote_push_options_ptrs: Vec::new(),
         }
     }
 
-    /// Set the callbacks to use for the fetch operation.
+    /// Set the callbacks to use for the push operation.
     pub fn remote_callbacks(&mut self, cbs: RemoteCallbacks<'cb>) -> &mut Self {
         self.callbacks = Some(cbs);
         self
     }
 
-    /// Set the proxy options to use for the fetch operation.
+    /// Set the proxy options to use for the push operation.
     pub fn proxy_options(&mut self, opts: ProxyOptions<'cb>) -> &mut Self {
         self.proxy = Some(opts);
         self
@@ -580,6 +671,40 @@ impl<'cb> PushOptions<'cb> {
     /// create, and the default value is 1.
     pub fn packbuilder_parallelism(&mut self, parallel: u32) -> &mut Self {
         self.pb_parallelism = parallel;
+        self
+    }
+
+    /// Set remote redirection settings; whether redirects to another host are
+    /// permitted.
+    ///
+    /// By default, git will follow a redirect on the initial request
+    /// (`/info/refs`), but not subsequent requests.
+    pub fn follow_redirects(&mut self, redirect: RemoteRedirect) -> &mut Self {
+        self.follow_redirects = redirect;
+        self
+    }
+
+    /// Set extra headers for this push operation.
+    pub fn custom_headers(&mut self, custom_headers: &[&str]) -> &mut Self {
+        self.custom_headers = custom_headers
+            .iter()
+            .map(|&s| CString::new(s).unwrap())
+            .collect();
+        self.custom_headers_ptrs = self.custom_headers.iter().map(|s| s.as_ptr()).collect();
+        self
+    }
+
+    /// Set "push options" to deliver to the remote.
+    pub fn remote_push_options(&mut self, remote_push_options: &[&str]) -> &mut Self {
+        self.remote_push_options = remote_push_options
+            .iter()
+            .map(|&s| CString::new(s).unwrap())
+            .collect();
+        self.remote_push_options_ptrs = self
+            .remote_push_options
+            .iter()
+            .map(|s| s.as_ptr())
+            .collect();
         self
     }
 }
@@ -604,10 +729,14 @@ impl<'cb> Binding for PushOptions<'cb> {
                 .map(|m| m.raw())
                 .unwrap_or_else(|| ProxyOptions::new().raw()),
             pb_parallelism: self.pb_parallelism as libc::c_uint,
-            // TODO: expose this as a builder option
-            custom_headers: raw::git_strarray {
-                count: 0,
-                strings: ptr::null_mut(),
+            follow_redirects: self.follow_redirects.raw(),
+            custom_headers: git_strarray {
+                count: self.custom_headers_ptrs.len(),
+                strings: self.custom_headers_ptrs.as_ptr() as *mut _,
+            },
+            remote_push_options: git_strarray {
+                count: self.remote_push_options.len(),
+                strings: self.remote_push_options_ptrs.as_ptr() as *mut _,
             },
         }
     }
@@ -647,9 +776,25 @@ impl<'repo, 'connection, 'cb> Drop for RemoteConnection<'repo, 'connection, 'cb>
     }
 }
 
+impl Default for RemoteRedirect {
+    fn default() -> Self {
+        RemoteRedirect::Initial
+    }
+}
+
+impl RemoteRedirect {
+    fn raw(&self) -> raw::git_remote_redirect_t {
+        match self {
+            RemoteRedirect::None => raw::GIT_REMOTE_REDIRECT_NONE,
+            RemoteRedirect::Initial => raw::GIT_REMOTE_REDIRECT_INITIAL,
+            RemoteRedirect::All => raw::GIT_REMOTE_REDIRECT_ALL,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{AutotagOption, PushOptions};
+    use crate::{AutotagOption, PushOptions, RemoteUpdateFlags};
     use crate::{Direction, FetchOptions, Remote, RemoteCallbacks, Repository};
     use std::cell::Cell;
     use tempfile::TempDir;
@@ -738,10 +883,20 @@ mod tests {
         origin.fetch(&[] as &[&str], None, None).unwrap();
         origin.fetch(&[] as &[&str], None, Some("foo")).unwrap();
         origin
-            .update_tips(None, true, AutotagOption::Unspecified, None)
+            .update_tips(
+                None,
+                RemoteUpdateFlags::UPDATE_FETCHHEAD,
+                AutotagOption::Unspecified,
+                None,
+            )
             .unwrap();
         origin
-            .update_tips(None, true, AutotagOption::All, Some("foo"))
+            .update_tips(
+                None,
+                RemoteUpdateFlags::UPDATE_FETCHHEAD,
+                AutotagOption::All,
+                Some("foo"),
+            )
             .unwrap();
 
         t!(repo.remote_add_fetch("origin", "foo"));
@@ -767,9 +922,15 @@ mod tests {
     }
 
     #[test]
-    fn is_valid() {
+    fn is_valid_name() {
         assert!(Remote::is_valid_name("foobar"));
         assert!(!Remote::is_valid_name("\x01"));
+    }
+
+    #[test]
+    #[should_panic]
+    fn is_valid_name_for_invalid_remote() {
+        Remote::is_valid_name("ab\012");
     }
 
     #[test]
@@ -872,7 +1033,7 @@ mod tests {
         let repo = Repository::clone(&url, td3.path()).unwrap();
         let commit = repo.head().unwrap().target().unwrap();
         let commit = repo.find_commit(commit).unwrap();
-        assert_eq!(commit.message(), Some("initial"));
+        assert_eq!(commit.message(), Some("initial\n\nbody"));
     }
 
     #[test]
@@ -915,5 +1076,95 @@ mod tests {
         });
         remote.prune(Some(callbacks)).unwrap();
         assert_branch_count(&repo, 0);
+    }
+
+    #[test]
+    fn push_negotiation() {
+        let (_td, repo) = crate::test::repo_init();
+        let oid = repo.head().unwrap().target().unwrap();
+
+        let td2 = TempDir::new().unwrap();
+        let url = crate::test::path2url(td2.path());
+        let mut opts = crate::RepositoryInitOptions::new();
+        opts.bare(true);
+        opts.initial_head("main");
+        let remote_repo = Repository::init_opts(td2.path(), &opts).unwrap();
+
+        // reject pushing a branch
+        let mut remote = repo.remote("origin", &url).unwrap();
+        let mut updated = false;
+        {
+            let mut callbacks = RemoteCallbacks::new();
+            callbacks.push_negotiation(|updates| {
+                assert!(!updated);
+                updated = true;
+                assert_eq!(updates.len(), 1);
+                let u = &updates[0];
+                assert_eq!(u.src_refname().unwrap(), "refs/heads/main");
+                assert!(u.src().is_zero());
+                assert_eq!(u.dst_refname().unwrap(), "refs/heads/main");
+                assert_eq!(u.dst(), oid);
+                Err(crate::Error::from_str("rejected"))
+            });
+            let mut options = PushOptions::new();
+            options.remote_callbacks(callbacks);
+            assert!(remote
+                .push(&["refs/heads/main"], Some(&mut options))
+                .is_err());
+        }
+        assert!(updated);
+        assert_eq!(remote_repo.branches(None).unwrap().count(), 0);
+
+        // push 3 branches
+        let commit = repo.find_commit(oid).unwrap();
+        repo.branch("new1", &commit, true).unwrap();
+        repo.branch("new2", &commit, true).unwrap();
+        let mut flag = 0;
+        updated = false;
+        {
+            let mut callbacks = RemoteCallbacks::new();
+            callbacks.push_negotiation(|updates| {
+                assert!(!updated);
+                updated = true;
+                assert_eq!(updates.len(), 3);
+                for u in updates {
+                    assert!(u.src().is_zero());
+                    assert_eq!(u.dst(), oid);
+                    let src_name = u.src_refname().unwrap();
+                    let dst_name = u.dst_refname().unwrap();
+                    match src_name {
+                        "refs/heads/main" => {
+                            assert_eq!(dst_name, src_name);
+                            flag |= 1;
+                        }
+                        "refs/heads/new1" => {
+                            assert_eq!(dst_name, "refs/heads/dev1");
+                            flag |= 2;
+                        }
+                        "refs/heads/new2" => {
+                            assert_eq!(dst_name, "refs/heads/dev2");
+                            flag |= 4;
+                        }
+                        _ => panic!("unexpected refname: {}", src_name),
+                    }
+                }
+                Ok(())
+            });
+            let mut options = PushOptions::new();
+            options.remote_callbacks(callbacks);
+            remote
+                .push(
+                    &[
+                        "refs/heads/main",
+                        "refs/heads/new1:refs/heads/dev1",
+                        "refs/heads/new2:refs/heads/dev2",
+                    ],
+                    Some(&mut options),
+                )
+                .unwrap();
+        }
+        assert!(updated);
+        assert_eq!(flag, 7);
+        assert_eq!(remote_repo.branches(None).unwrap().count(), 3);
     }
 }

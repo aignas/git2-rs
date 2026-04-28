@@ -1,4 +1,4 @@
-use libc;
+use std::iter::FusedIterator;
 use std::marker;
 use std::mem;
 use std::ops::Range;
@@ -145,6 +145,29 @@ impl<'repo> Commit<'repo> {
         unsafe { crate::opt_bytes(self, raw::git_commit_summary(self.raw)) }
     }
 
+    /// Get the long "body" of the git commit message.
+    ///
+    /// The returned message is the body of the commit, comprising everything
+    /// but the first paragraph of the message. Leading and trailing whitespaces
+    /// are trimmed.
+    ///
+    /// `None` may be returned if an error occurs or if the summary is not valid
+    /// utf-8.
+    pub fn body(&self) -> Option<&str> {
+        self.body_bytes().and_then(|s| str::from_utf8(s).ok())
+    }
+
+    /// Get the long "body" of the git commit message.
+    ///
+    /// The returned message is the body of the commit, comprising everything
+    /// but the first paragraph of the message. Leading and trailing whitespaces
+    /// are trimmed.
+    ///
+    /// `None` may be returned if an error occurs.
+    pub fn body_bytes(&self) -> Option<&[u8]> {
+        unsafe { crate::opt_bytes(self, raw::git_commit_body(self.raw)) }
+    }
+
     /// Get the commit time (i.e. committer time) of a commit.
     ///
     /// The first element of the tuple is the time, in seconds, since the epoch.
@@ -237,9 +260,7 @@ impl<'repo> Commit<'repo> {
         message: Option<&str>,
         tree: Option<&Tree<'repo>>,
     ) -> Result<Oid, Error> {
-        let mut raw = raw::git_oid {
-            id: [0; raw::GIT_OID_RAWSZ],
-        };
+        let mut raw = crate::util::zeroed_raw_oid();
         let update_ref = crate::opt_cstr(update_ref)?;
         let encoding = crate::opt_cstr(message_encoding)?;
         let message = crate::opt_cstr(message)?;
@@ -313,7 +334,7 @@ impl<'repo> Binding for Commit<'repo> {
     type Raw = *mut raw::git_commit;
     unsafe fn from_raw(raw: *mut raw::git_commit) -> Commit<'repo> {
         Commit {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -353,6 +374,8 @@ impl<'repo, 'commit> DoubleEndedIterator for Parents<'commit, 'repo> {
     }
 }
 
+impl<'repo, 'commit> FusedIterator for Parents<'commit, 'repo> {}
+
 impl<'repo, 'commit> ExactSizeIterator for Parents<'commit, 'repo> {}
 
 /// Aborts iteration when a commit cannot be found
@@ -377,6 +400,8 @@ impl<'commit> DoubleEndedIterator for ParentIds<'commit> {
     }
 }
 
+impl<'commit> FusedIterator for ParentIds<'commit> {}
+
 impl<'commit> ExactSizeIterator for ParentIds<'commit> {}
 
 impl<'repo> Clone for Commit<'repo> {
@@ -399,12 +424,14 @@ mod tests {
         let head = repo.head().unwrap();
         let target = head.target().unwrap();
         let commit = repo.find_commit(target).unwrap();
-        assert_eq!(commit.message(), Some("initial"));
+        assert_eq!(commit.message(), Some("initial\n\nbody"));
+        assert_eq!(commit.body(), Some("body"));
         assert_eq!(commit.id(), target);
         commit.message_raw().unwrap();
         commit.raw_header().unwrap();
         commit.message_encoding();
         commit.summary().unwrap();
+        commit.body().unwrap();
         commit.tree_id();
         commit.tree().unwrap();
         assert_eq!(commit.parents().count(), 0);

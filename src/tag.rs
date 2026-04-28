@@ -1,10 +1,11 @@
+use std::ffi::CString;
 use std::marker;
 use std::mem;
 use std::ptr;
 use std::str;
 
 use crate::util::Binding;
-use crate::{raw, signature, Error, Object, ObjectType, Oid, Signature};
+use crate::{call, raw, signature, Error, Object, ObjectType, Oid, Signature};
 
 /// A structure to represent a git [tag][1]
 ///
@@ -15,6 +16,19 @@ pub struct Tag<'repo> {
 }
 
 impl<'repo> Tag<'repo> {
+    /// Determine whether a tag name is valid, meaning that (when prefixed with refs/tags/) that
+    /// it is a valid reference name, and that any additional tag name restrictions are imposed
+    /// (eg, it cannot start with a -).
+    pub fn is_valid_name(tag_name: &str) -> bool {
+        crate::init();
+        let tag_name = CString::new(tag_name).unwrap();
+        let mut valid: libc::c_int = 0;
+        unsafe {
+            call::c_try(raw::git_tag_name_is_valid(&mut valid, tag_name.as_ptr())).unwrap();
+        }
+        valid == 1
+    }
+
     /// Get the id (SHA1) of a repository tag
     pub fn id(&self) -> Oid {
         unsafe { Binding::from_raw(raw::git_tag_id(&*self.raw)) }
@@ -86,7 +100,7 @@ impl<'repo> Tag<'repo> {
         unsafe { Binding::from_raw(raw::git_tag_target_id(&*self.raw)) }
     }
 
-    /// Get the OID of the tagged object of a tag
+    /// Get the ObjectType of the tagged object of a tag
     pub fn target_type(&self) -> Option<ObjectType> {
         unsafe { ObjectType::from_raw(raw::git_tag_target_type(&*self.raw)) }
     }
@@ -118,7 +132,7 @@ impl<'repo> Binding for Tag<'repo> {
     type Raw = *mut raw::git_tag;
     unsafe fn from_raw(raw: *mut raw::git_tag) -> Tag<'repo> {
         Tag {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -141,6 +155,30 @@ impl<'repo> Drop for Tag<'repo> {
 
 #[cfg(test)]
 mod tests {
+    use crate::Tag;
+
+    // Reference -- https://git-scm.com/docs/git-check-ref-format
+    #[test]
+    fn name_is_valid() {
+        assert_eq!(Tag::is_valid_name("blah_blah"), true);
+        assert_eq!(Tag::is_valid_name("v1.2.3"), true);
+        assert_eq!(Tag::is_valid_name("my/tag"), true);
+        assert_eq!(Tag::is_valid_name("@"), true);
+
+        assert_eq!(Tag::is_valid_name("-foo"), false);
+        assert_eq!(Tag::is_valid_name("foo:bar"), false);
+        assert_eq!(Tag::is_valid_name("foo^bar"), false);
+        assert_eq!(Tag::is_valid_name("foo."), false);
+        assert_eq!(Tag::is_valid_name("@{"), false);
+        assert_eq!(Tag::is_valid_name("as\\cd"), false);
+    }
+
+    #[test]
+    #[should_panic]
+    fn is_valid_name_for_invalid_tag() {
+        Tag::is_valid_name("ab\012");
+    }
+
     #[test]
     fn smoke() {
         let (_td, repo) = crate::test::repo_init();

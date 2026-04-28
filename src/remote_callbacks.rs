@@ -1,5 +1,5 @@
 use libc::{c_char, c_int, c_uint, c_void, size_t};
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::mem;
 use std::ptr;
 use std::slice;
@@ -9,6 +9,7 @@ use crate::cert::Cert;
 use crate::util::Binding;
 use crate::{
     panic, raw, Cred, CredentialType, Error, IndexerProgress, Oid, PackBuilderStage, Progress,
+    PushUpdate,
 };
 
 /// A structure to contain the callbacks which are invoked when a repository is
@@ -25,14 +26,15 @@ pub struct RemoteCallbacks<'a> {
     update_tips: Option<Box<UpdateTips<'a>>>,
     certificate_check: Option<Box<CertificateCheck<'a>>>,
     push_update_reference: Option<Box<PushUpdateReference<'a>>>,
+    push_negotiation: Option<Box<PushNegotiation<'a>>>,
 }
 
 /// Callback used to acquire credentials for when a remote is fetched.
 ///
 /// * `url` - the resource for which the credentials are required.
-/// * `username_from_url` - the username that was embedded in the url, or `None`
+/// * `username_from_url` - the username that was embedded in the URL, or `None`
 ///                         if it was not included.
-/// * `allowed_types` - a bitmask stating which cred types are ok to return.
+/// * `allowed_types` - a bitmask stating which cred types are OK to return.
 pub type Credentials<'a> =
     dyn FnMut(&str, Option<&str>, CredentialType) -> Result<Cred, Error> + 'a;
 
@@ -46,12 +48,23 @@ pub type UpdateTips<'a> = dyn FnMut(&str, Oid, Oid) -> bool + 'a;
 
 /// Callback for a custom certificate check.
 ///
-/// The first argument is the certificate receved on the connection.
+/// The first argument is the certificate received on the connection.
 /// Certificates are typically either an SSH or X509 certificate.
 ///
 /// The second argument is the hostname for the connection is passed as the last
 /// argument.
-pub type CertificateCheck<'a> = dyn FnMut(&Cert<'_>, &str) -> bool + 'a;
+pub type CertificateCheck<'a> =
+    dyn FnMut(&Cert<'_>, &str) -> Result<CertificateCheckStatus, Error> + 'a;
+
+/// The return value for the [`RemoteCallbacks::certificate_check`] callback.
+pub enum CertificateCheckStatus {
+    /// Indicates that the certificate should be accepted.
+    CertificateOk,
+    /// Indicates that the certificate callback is neither accepting nor
+    /// rejecting the certificate. The result of the certificate checks
+    /// built-in to libgit2 will be used instead.
+    CertificatePassthrough,
+}
 
 /// Callback for each updated reference on push.
 ///
@@ -63,18 +76,29 @@ pub type PushUpdateReference<'a> = dyn FnMut(&str, Option<&str>) -> Result<(), E
 /// Callback for push transfer progress
 ///
 /// Parameters:
-///     * current
-///     * total
-///     * bytes
+/// * current
+/// * total
+/// * bytes
 pub type PushTransferProgress<'a> = dyn FnMut(usize, usize, usize) + 'a;
 
 /// Callback for pack progress
 ///
+/// Be aware that this is called inline with pack building operations,
+/// so performance may be affected.
+///
 /// Parameters:
-///     * stage
-///     * current
-///     * total
+/// * stage
+/// * current
+/// * total
 pub type PackProgress<'a> = dyn FnMut(PackBuilderStage, usize, usize) + 'a;
+
+/// The callback is called once between the negotiation step and the upload.
+///
+/// The argument is a slice containing the updates which will be sent as
+/// commands to the destination.
+///
+/// The push is cancelled if an error is returned.
+pub type PushNegotiation<'a> = dyn FnMut(&[PushUpdate<'_>]) -> Result<(), Error> + 'a;
 
 impl<'a> Default for RemoteCallbacks<'a> {
     fn default() -> Self {
@@ -94,6 +118,7 @@ impl<'a> RemoteCallbacks<'a> {
             certificate_check: None,
             push_update_reference: None,
             push_progress: None,
+            push_negotiation: None,
         }
     }
 
@@ -162,7 +187,7 @@ impl<'a> RemoteCallbacks<'a> {
     /// connection to proceed.
     pub fn certificate_check<F>(&mut self, cb: F) -> &mut RemoteCallbacks<'a>
     where
-        F: FnMut(&Cert<'_>, &str) -> bool + 'a,
+        F: FnMut(&Cert<'_>, &str) -> Result<CertificateCheckStatus, Error> + 'a,
     {
         self.certificate_check = Some(Box::new(cb) as Box<CertificateCheck<'a>>);
         self
@@ -182,6 +207,11 @@ impl<'a> RemoteCallbacks<'a> {
     }
 
     /// The callback through which progress of push transfer is monitored
+    ///
+    /// Parameters:
+    /// * current
+    /// * total
+    /// * bytes
     pub fn push_transfer_progress<F>(&mut self, cb: F) -> &mut RemoteCallbacks<'a>
     where
         F: FnMut(usize, usize, usize) + 'a,
@@ -191,13 +221,33 @@ impl<'a> RemoteCallbacks<'a> {
     }
 
     /// Function to call with progress information during pack building.
+    ///
     /// Be aware that this is called inline with pack building operations,
     /// so performance may be affected.
+    ///
+    /// Parameters:
+    /// * stage
+    /// * current
+    /// * total
     pub fn pack_progress<F>(&mut self, cb: F) -> &mut RemoteCallbacks<'a>
     where
         F: FnMut(PackBuilderStage, usize, usize) + 'a,
     {
         self.pack_progress = Some(Box::new(cb) as Box<PackProgress<'a>>);
+        self
+    }
+
+    /// The callback is called once between the negotiation step and the upload.
+    ///
+    /// The argument to the callback is a slice containing the updates which
+    /// will be sent as commands to the destination.
+    ///
+    /// The push is cancelled if the callback returns an error.
+    pub fn push_negotiation<F>(&mut self, cb: F) -> &mut RemoteCallbacks<'a>
+    where
+        F: FnMut(&[PushUpdate<'_>]) -> Result<(), Error> + 'a,
+    {
+        self.push_negotiation = Some(Box::new(cb) as Box<PushNegotiation<'a>>);
         self
     }
 }
@@ -245,6 +295,9 @@ impl<'a> Binding for RemoteCallbacks<'a> {
                 ) -> c_int = update_tips_cb;
                 callbacks.update_tips = Some(f);
             }
+            if self.push_negotiation.is_some() {
+                callbacks.push_negotiation = Some(push_negotiation_cb);
+            }
             callbacks.payload = self as *const _ as *mut _;
             callbacks
         }
@@ -277,11 +330,7 @@ extern "C" fn credentials_cb(
 
             let cred_type = CredentialType::from_bits_truncate(allowed_types as u32);
 
-            callback(url, username_from_url, cred_type).map_err(|e| {
-                let s = CString::new(e.to_string()).unwrap();
-                raw::git_error_set_str(e.raw_code() as c_int, s.as_ptr());
-                e.raw_code() as c_int
-            })
+            callback(url, username_from_url, cred_type).map_err(|e| e.raw_set_git_error())
         });
         match ok {
             Some(Ok(cred)) => {
@@ -371,16 +420,20 @@ extern "C" fn certificate_check_cb(
         let payload = &mut *(data as *mut RemoteCallbacks<'_>);
         let callback = match payload.certificate_check {
             Some(ref mut c) => c,
-            None => return true,
+            None => return Ok(CertificateCheckStatus::CertificatePassthrough),
         };
         let cert = Binding::from_raw(cert);
         let hostname = str::from_utf8(CStr::from_ptr(hostname).to_bytes()).unwrap();
         callback(&cert, hostname)
     });
-    if ok == Some(true) {
-        0
-    } else {
-        -1
+    match ok {
+        Some(Ok(CertificateCheckStatus::CertificateOk)) => 0,
+        Some(Ok(CertificateCheckStatus::CertificatePassthrough)) => raw::GIT_PASSTHROUGH as c_int,
+        Some(Err(e)) => unsafe { e.raw_set_git_error() },
+        None => {
+            // Panic. The *should* get resumed by some future call to check().
+            -1
+        }
     }
 }
 
@@ -403,7 +456,7 @@ extern "C" fn push_update_reference_cb(
         };
         match callback(refname, status) {
             Ok(()) => 0,
-            Err(e) => e.raw_code(),
+            Err(e) => e.raw_set_git_error(),
         }
     })
     .unwrap_or(-1)
@@ -447,6 +500,27 @@ extern "C" fn pack_progress_cb(
         callback(stage, current as usize, total as usize);
 
         0
+    })
+    .unwrap_or(-1)
+}
+
+extern "C" fn push_negotiation_cb(
+    updates: *mut *const raw::git_push_update,
+    len: size_t,
+    payload: *mut c_void,
+) -> c_int {
+    panic::wrap(|| unsafe {
+        let payload = &mut *(payload as *mut RemoteCallbacks<'_>);
+        let callback = match payload.push_negotiation {
+            Some(ref mut c) => c,
+            None => return 0,
+        };
+
+        let updates = slice::from_raw_parts(updates as *mut PushUpdate<'_>, len);
+        match callback(updates) {
+            Ok(()) => 0,
+            Err(e) => e.raw_set_git_error(),
+        }
     })
     .unwrap_or(-1)
 }

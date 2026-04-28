@@ -1,16 +1,17 @@
 use std::io;
 use std::marker;
-use std::mem::MaybeUninit;
 use std::ptr;
 use std::slice;
 
 use std::ffi::CString;
 
-use libc::{c_char, c_int, c_void, size_t};
+use libc::{c_char, c_int, c_uint, c_void, size_t};
 
 use crate::panic;
 use crate::util::Binding;
-use crate::{raw, Error, IndexerProgress, Mempack, Object, ObjectType, Oid, Progress};
+use crate::{
+    raw, Error, IndexerProgress, Mempack, Object, ObjectType, OdbLookupFlags, Oid, Progress,
+};
 
 /// A structure to represent a git object database
 pub struct Odb<'repo> {
@@ -18,12 +19,16 @@ pub struct Odb<'repo> {
     _marker: marker::PhantomData<Object<'repo>>,
 }
 
+// `git_odb` uses locking and atomics internally.
+unsafe impl<'repo> Send for Odb<'repo> {}
+unsafe impl<'repo> Sync for Odb<'repo> {}
+
 impl<'repo> Binding for Odb<'repo> {
     type Raw = *mut raw::git_odb;
 
     unsafe fn from_raw(raw: *mut raw::git_odb) -> Odb<'repo> {
         Odb {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -139,9 +144,7 @@ impl<'repo> Odb<'repo> {
     /// Write an object to the database.
     pub fn write(&self, kind: ObjectType, data: &[u8]) -> Result<Oid, Error> {
         unsafe {
-            let mut out = raw::git_oid {
-                id: [0; raw::GIT_OID_RAWSZ],
-            };
+            let mut out = crate::util::zeroed_raw_oid();
             try_call!(raw::git_odb_write(
                 &mut out,
                 self.raw,
@@ -156,7 +159,6 @@ impl<'repo> Odb<'repo> {
     /// Create stream for writing a pack file to the ODB
     pub fn packwriter(&self) -> Result<OdbPackwriter<'_>, Error> {
         let mut out = ptr::null_mut();
-        let progress = MaybeUninit::uninit();
         let progress_cb: raw::git_indexer_progress_cb = Some(write_pack_progress_cb);
         let progress_payload = Box::new(OdbPackwriterCb { cb: None });
         let progress_payload_ptr = Box::into_raw(progress_payload);
@@ -172,7 +174,7 @@ impl<'repo> Odb<'repo> {
 
         Ok(OdbPackwriter {
             raw: out,
-            progress,
+            progress: Default::default(),
             progress_payload_ptr,
         })
     }
@@ -182,12 +184,15 @@ impl<'repo> Odb<'repo> {
         unsafe { raw::git_odb_exists(self.raw, oid.raw()) != 0 }
     }
 
+    /// Checks if the object database has an object, with extended flags.
+    pub fn exists_ext(&self, oid: Oid, flags: OdbLookupFlags) -> bool {
+        unsafe { raw::git_odb_exists_ext(self.raw, oid.raw(), flags.bits() as c_uint) != 0 }
+    }
+
     /// Potentially finds an object that starts with the given prefix.
     pub fn exists_prefix(&self, short_oid: Oid, len: usize) -> Result<Oid, Error> {
         unsafe {
-            let mut out = raw::git_oid {
-                id: [0; raw::GIT_OID_RAWSZ],
-            };
+            let mut out = crate::util::zeroed_raw_oid();
             try_call!(raw::git_odb_exists_prefix(
                 &mut out,
                 self.raw,
@@ -229,7 +234,7 @@ impl<'repo> Odb<'repo> {
     /// deletion of the mempack backend.
     ///
     /// Here is an example that fails to compile because it tries to hold the
-    /// mempack reference beyond the odb's lifetime:
+    /// mempack reference beyond the Odb's lifetime:
     ///
     /// ```compile_fail
     /// use git2::Odb;
@@ -273,7 +278,7 @@ impl<'a> Binding for OdbObject<'a> {
 
     unsafe fn from_raw(raw: *mut raw::git_odb_object) -> OdbObject<'a> {
         OdbObject {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -322,12 +327,16 @@ pub struct OdbReader<'repo> {
     _marker: marker::PhantomData<Object<'repo>>,
 }
 
+// `git_odb_stream` is not thread-safe internally, so it can't use `Sync`, but moving it to another
+// thread and continuing to read will work.
+unsafe impl<'repo> Send for OdbReader<'repo> {}
+
 impl<'repo> Binding for OdbReader<'repo> {
     type Raw = *mut raw::git_odb_stream;
 
     unsafe fn from_raw(raw: *mut raw::git_odb_stream) -> OdbReader<'repo> {
         OdbReader {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -351,7 +360,7 @@ impl<'repo> io::Read for OdbReader<'repo> {
             if res < 0 {
                 Err(io::Error::new(io::ErrorKind::Other, "Read error"))
             } else {
-                Ok(len)
+                Ok(res as _)
             }
         }
     }
@@ -363,17 +372,19 @@ pub struct OdbWriter<'repo> {
     _marker: marker::PhantomData<Object<'repo>>,
 }
 
+// `git_odb_stream` is not thread-safe internally, so it can't use `Sync`, but moving it to another
+// thread and continuing to write will work.
+unsafe impl<'repo> Send for OdbWriter<'repo> {}
+
 impl<'repo> OdbWriter<'repo> {
     /// Finish writing to an ODB stream
     ///
     /// This method can be used to finalize writing object to the database and get an identifier.
     /// The object will take its final name and will be available to the odb.
     /// This method will fail if the total number of received bytes differs from the size declared with odb_writer()
-    /// Attepting write after finishing will be ignored.
+    /// Attempting write after finishing will be ignored.
     pub fn finalize(&mut self) -> Result<Oid, Error> {
-        let mut raw = raw::git_oid {
-            id: [0; raw::GIT_OID_RAWSZ],
-        };
+        let mut raw = crate::util::zeroed_raw_oid();
         unsafe {
             try_call!(raw::git_odb_stream_finalize_write(&mut raw, self.raw));
             Ok(Binding::from_raw(&raw as *const _))
@@ -386,7 +397,7 @@ impl<'repo> Binding for OdbWriter<'repo> {
 
     unsafe fn from_raw(raw: *mut raw::git_odb_stream) -> OdbWriter<'repo> {
         OdbWriter {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -419,14 +430,14 @@ impl<'repo> io::Write for OdbWriter<'repo> {
     }
 }
 
-struct OdbPackwriterCb<'repo> {
-    cb: Option<Box<IndexerProgress<'repo>>>,
+pub(crate) struct OdbPackwriterCb<'repo> {
+    pub(crate) cb: Option<Box<IndexerProgress<'repo>>>,
 }
 
 /// A stream to write a packfile to the ODB
 pub struct OdbPackwriter<'repo> {
     raw: *mut raw::git_odb_writepack,
-    progress: MaybeUninit<raw::git_indexer_progress>,
+    progress: raw::git_indexer_progress,
     progress_payload_ptr: *mut OdbPackwriterCb<'repo>,
 }
 
@@ -436,12 +447,12 @@ impl<'repo> OdbPackwriter<'repo> {
         unsafe {
             let writepack = &*self.raw;
             let res = match writepack.commit {
-                Some(commit) => commit(self.raw, self.progress.as_mut_ptr()),
+                Some(commit) => commit(self.raw, &mut self.progress),
                 None => -1,
             };
 
             if res < 0 {
-                Err(Error::last_error(res).unwrap())
+                Err(Error::last_error(res))
             } else {
                 Ok(res)
             }
@@ -470,7 +481,7 @@ impl<'repo> io::Write for OdbPackwriter<'repo> {
 
             let writepack = &*self.raw;
             let res = match writepack.append {
-                Some(append) => append(self.raw, ptr, len, self.progress.as_mut_ptr()),
+                Some(append) => append(self.raw, ptr, len, &mut self.progress),
                 None => -1,
             };
 
@@ -495,7 +506,7 @@ impl<'repo> Drop for OdbPackwriter<'repo> {
                 None => (),
             };
 
-            Box::from_raw(self.progress_payload_ptr);
+            drop(Box::from_raw(self.progress_payload_ptr));
         }
     }
 }
@@ -523,7 +534,7 @@ extern "C" fn foreach_cb(id: *const raw::git_oid, payload: *mut c_void) -> c_int
     .unwrap_or(1)
 }
 
-extern "C" fn write_pack_progress_cb(
+pub(crate) extern "C" fn write_pack_progress_cb(
     stats: *const raw::git_indexer_progress,
     payload: *mut c_void,
 ) -> c_int {
@@ -708,5 +719,46 @@ mod tests {
         packwriter.commit().unwrap();
         t!(repo.reset(commit1.as_object(), ResetType::Hard, None));
         assert!(foo_file.exists());
+    }
+
+    #[test]
+    fn stream_read() {
+        // Test for read impl of OdbReader.
+        const FOO_TEXT: &[u8] = b"this is a test";
+        let (_td, repo) = crate::test::repo_init();
+        let p = repo.path().parent().unwrap().join("foo");
+        std::fs::write(&p, FOO_TEXT).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("foo")).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = repo.signature().unwrap();
+        let head_id = repo.refname_to_id("HEAD").unwrap();
+        let parent = repo.find_commit(head_id).unwrap();
+        let _commit = repo
+            .commit(Some("HEAD"), &sig, &sig, "commit", &tree, &[&parent])
+            .unwrap();
+
+        // Try reading from a commit object.
+        let odb = repo.odb().unwrap();
+        let oid = repo.refname_to_id("HEAD").unwrap();
+        let (mut reader, size, ty) = odb.reader(oid).unwrap();
+        assert!(ty == ObjectType::Commit);
+        let mut x = [0; 10000];
+        let r = reader.read(&mut x).unwrap();
+        assert!(r == size);
+
+        // Try reading from a blob. This assumes it is a loose object (packed
+        // objects can't read).
+        let commit = repo.find_commit(oid).unwrap();
+        let tree = commit.tree().unwrap();
+        let entry = tree.get_name("foo").unwrap();
+        let (mut reader, size, ty) = odb.reader(entry.id()).unwrap();
+        assert_eq!(size, FOO_TEXT.len());
+        assert!(ty == ObjectType::Blob);
+        let mut x = [0; 10000];
+        let r = reader.read(&mut x).unwrap();
+        assert_eq!(r, 14);
+        assert_eq!(&x[..FOO_TEXT.len()], FOO_TEXT);
     }
 }

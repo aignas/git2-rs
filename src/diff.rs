@@ -1,5 +1,6 @@
 use libc::{c_char, c_int, c_void, size_t};
 use std::ffi::CString;
+use std::iter::FusedIterator;
 use std::marker;
 use std::mem;
 use std::ops::Range;
@@ -254,6 +255,8 @@ impl<'repo> Diff<'repo> {
     /// Create an e-mail ready patch from a diff.
     ///
     /// Matches the format created by `git format-patch`
+    #[doc(hidden)]
+    #[deprecated(note = "refactored to `Email::from_diff` to match upstream")]
     pub fn format_email(
         &mut self,
         patch_no: usize,
@@ -264,7 +267,7 @@ impl<'repo> Diff<'repo> {
         assert!(patch_no > 0);
         assert!(patch_no <= total_patches);
         let mut default = DiffFormatEmailOptions::default();
-        let mut raw_opts = opts.map_or(&mut default.raw, |opts| &mut opts.raw);
+        let raw_opts = opts.map_or(&mut default.raw, |opts| &mut opts.raw);
         let summary = commit.summary_bytes().unwrap();
         let mut message = commit.message_bytes();
         assert!(message.starts_with(summary));
@@ -277,17 +280,16 @@ impl<'repo> Diff<'repo> {
         raw_opts.body = message.as_ptr() as *const _;
         raw_opts.author = commit.author().raw();
         let buf = Buf::new();
+        #[allow(deprecated)]
         unsafe {
             try_call!(raw::git_diff_format_email(buf.raw(), self.raw, &*raw_opts));
         }
         Ok(buf)
     }
 
-    /// Create an patchid from a diff.
+    /// Create a patch ID from a diff.
     pub fn patchid(&self, opts: Option<&mut DiffPatchidOptions>) -> Result<Oid, Error> {
-        let mut raw = raw::git_oid {
-            id: [0; raw::GIT_OID_RAWSZ],
-        };
+        let mut raw = crate::util::zeroed_raw_oid();
         unsafe {
             try_call!(raw::git_diff_patchid(
                 &mut raw,
@@ -307,8 +309,9 @@ impl Diff<'static> {
     /// produced if you actually produced it computationally by comparing
     /// two trees, however there may be subtle differences. For example,
     /// a patch file likely contains abbreviated object IDs, so the
-    /// object IDs parsed by this function will also be abreviated.
+    /// object IDs parsed by this function will also be abbreviated.
     pub fn from_buffer(buffer: &[u8]) -> Result<Diff<'static>, Error> {
+        crate::init();
         let mut diff: *mut raw::git_diff = std::ptr::null_mut();
         unsafe {
             // NOTE: Doesn't depend on repo, so lifetime can be 'static
@@ -446,7 +449,7 @@ impl<'repo> Binding for Diff<'repo> {
     type Raw = *mut raw::git_diff;
     unsafe fn from_raw(raw: *mut raw::git_diff) -> Diff<'repo> {
         Diff {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -544,7 +547,7 @@ impl<'a> Binding for DiffDelta<'a> {
     type Raw = *mut raw::git_diff_delta;
     unsafe fn from_raw(raw: *mut raw::git_diff_delta) -> DiffDelta<'a> {
         DiffDelta {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -617,6 +620,7 @@ impl<'a> DiffFile<'a> {
             raw::GIT_FILEMODE_UNREADABLE => FileMode::Unreadable,
             raw::GIT_FILEMODE_TREE => FileMode::Tree,
             raw::GIT_FILEMODE_BLOB => FileMode::Blob,
+            raw::GIT_FILEMODE_BLOB_GROUP_WRITABLE => FileMode::BlobGroupWritable,
             raw::GIT_FILEMODE_BLOB_EXECUTABLE => FileMode::BlobExecutable,
             raw::GIT_FILEMODE_LINK => FileMode::Link,
             raw::GIT_FILEMODE_COMMIT => FileMode::Commit,
@@ -629,7 +633,7 @@ impl<'a> Binding for DiffFile<'a> {
     type Raw = *const raw::git_diff_file;
     unsafe fn from_raw(raw: *const raw::git_diff_file) -> DiffFile<'a> {
         DiffFile {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -675,7 +679,7 @@ impl DiffOptions {
         opts
     }
 
-    fn flag(&mut self, opt: i32, val: bool) -> &mut DiffOptions {
+    fn flag(&mut self, opt: raw::git_diff_option_t, val: bool) -> &mut DiffOptions {
         let opt = opt as u32;
         if val {
             self.raw.flags |= opt;
@@ -811,6 +815,11 @@ impl DiffOptions {
     /// Ignore whitespace at the end of line
     pub fn ignore_whitespace_eol(&mut self, ignore: bool) -> &mut DiffOptions {
         self.flag(raw::GIT_DIFF_IGNORE_WHITESPACE_EOL, ignore)
+    }
+
+    /// Ignore blank lines
+    pub fn ignore_blank_lines(&mut self, ignore: bool) -> &mut DiffOptions {
+        self.flag(raw::GIT_DIFF_IGNORE_BLANK_LINES, ignore)
     }
 
     /// When generating patch text, include the content of untracked files.
@@ -949,6 +958,8 @@ impl<'diff> DoubleEndedIterator for Deltas<'diff> {
         self.range.next_back().and_then(|i| self.diff.get_delta(i))
     }
 }
+impl<'diff> FusedIterator for Deltas<'diff> {}
+
 impl<'diff> ExactSizeIterator for Deltas<'diff> {}
 
 /// Line origin constants.
@@ -1080,7 +1091,7 @@ impl<'a> Binding for DiffLine<'a> {
     type Raw = *const raw::git_diff_line;
     unsafe fn from_raw(raw: *const raw::git_diff_line) -> DiffLine<'a> {
         DiffLine {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -1142,7 +1153,7 @@ impl<'a> Binding for DiffHunk<'a> {
     type Raw = *const raw::git_diff_hunk;
     unsafe fn from_raw(raw: *const raw::git_diff_hunk) -> DiffHunk<'a> {
         DiffHunk {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -1164,7 +1175,7 @@ impl<'a> std::fmt::Debug for DiffHunk<'a> {
 }
 
 impl DiffStats {
-    /// Get the total number of files chaned in a diff.
+    /// Get the total number of files changed in a diff.
     pub fn files_changed(&self) -> usize {
         unsafe { raw::git_diff_stats_files_changed(&*self.raw) as usize }
     }
@@ -1198,7 +1209,7 @@ impl Binding for DiffStats {
     type Raw = *mut raw::git_diff_stats;
 
     unsafe fn from_raw(raw: *mut raw::git_diff_stats) -> DiffStats {
-        DiffStats { raw: raw }
+        DiffStats { raw }
     }
     fn raw(&self) -> *mut raw::git_diff_stats {
         self.raw
@@ -1247,7 +1258,7 @@ impl<'a> Binding for DiffBinary<'a> {
     type Raw = *const raw::git_diff_binary;
     unsafe fn from_raw(raw: *const raw::git_diff_binary) -> DiffBinary<'a> {
         DiffBinary {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -1279,7 +1290,7 @@ impl<'a> Binding for DiffBinaryFile<'a> {
     type Raw = *const raw::git_diff_binary_file;
     unsafe fn from_raw(raw: *const raw::git_diff_binary_file) -> DiffBinaryFile<'a> {
         DiffBinaryFile {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -1446,7 +1457,7 @@ impl DiffFindOptions {
         self
     }
 
-    /// Similarity of modified to be glegible rename source (default 50)
+    /// Similarity of modified to be eligible rename source (default 50)
     pub fn rename_from_rewrite_threshold(&mut self, thresh: u16) -> &mut DiffFindOptions {
         self.raw.rename_from_rewrite_threshold = thresh;
         self
@@ -1474,6 +1485,11 @@ impl DiffFindOptions {
     }
 
     // TODO: expose git_diff_similarity_metric
+
+    /// Acquire a pointer to the underlying raw options.
+    pub unsafe fn raw(&mut self) -> *const raw::git_diff_find_options {
+        &self.raw
+    }
 }
 
 impl Default for DiffFormatEmailOptions {
@@ -1769,6 +1785,7 @@ mod tests {
                 None,
             )
             .unwrap();
+        #[allow(deprecated)]
         let actual_email = diff.format_email(1, 1, &updated_commit, None).unwrap();
         let actual_email = actual_email.as_str().unwrap();
         assert!(

@@ -1,4 +1,3 @@
-use libc;
 use std::ffi::CString;
 use std::marker;
 use std::path::{Path, PathBuf};
@@ -23,8 +22,39 @@ pub struct ConfigEntry<'cfg> {
 }
 
 /// An iterator over the `ConfigEntry` values of a `Config` structure.
+///
+/// Due to lifetime restrictions, `ConfigEntries` does not implement the
+/// standard [`Iterator`] trait. It provides a [`next`] function which only
+/// allows access to one entry at a time. [`for_each`] is available as a
+/// convenience function.
+///
+/// [`next`]: ConfigEntries::next
+/// [`for_each`]: ConfigEntries::for_each
+///
+/// # Example
+///
+/// ```
+/// // Example of how to collect all entries.
+/// use git2::Config;
+///
+/// let config = Config::new()?;
+/// let iter = config.entries(None)?;
+/// let mut entries = Vec::new();
+/// iter
+///     .for_each(|entry| {
+///         let name = entry.name().unwrap().to_string();
+///         let value = entry.value().unwrap_or("").to_string();
+///         entries.push((name, value))
+///     })?;
+/// for entry in &entries {
+///     println!("{} = {}", entry.0, entry.1);
+/// }
+/// # Ok::<(), git2::Error>(())
+///
+/// ```
 pub struct ConfigEntries<'cfg> {
     raw: *mut raw::git_config_iterator,
+    current: Option<ConfigEntry<'cfg>>,
     _marker: marker::PhantomData<&'cfg Config>,
 }
 
@@ -77,7 +107,7 @@ impl Config {
     /// exists. The returned path may be used on any method call to load
     /// the global configuration file.
     ///
-    /// This method will not guess the path to the xdg compatible config file
+    /// This method will not guess the path to the XDG compatible config file
     /// (`.config/git/config`).
     pub fn find_global() -> Result<PathBuf, Error> {
         crate::init();
@@ -90,7 +120,7 @@ impl Config {
 
     /// Locate the path to the system configuration file
     ///
-    /// If /etc/gitconfig doesn't exist, it will look for %PROGRAMFILES%
+    /// If /etc/gitconfig doesn't exist, it will look for `%PROGRAMFILES%`
     pub fn find_system() -> Result<PathBuf, Error> {
         crate::init();
         let buf = Buf::new();
@@ -100,9 +130,9 @@ impl Config {
         Ok(util::bytes2path(&buf).to_path_buf())
     }
 
-    /// Locate the path to the global xdg compatible configuration file
+    /// Locate the path to the global XDG compatible configuration file
     ///
-    /// The xdg compatible configuration file is usually located in
+    /// The XDG compatible configuration file is usually located in
     /// `$HOME/.config/git/config`.
     pub fn find_xdg() -> Result<PathBuf, Error> {
         crate::init();
@@ -207,7 +237,10 @@ impl Config {
     /// This is the same as `get_bytes` except that it may return `Err` if
     /// the bytes are not valid utf-8.
     ///
-    /// This method will return an error if this `Config` is not a snapshot.
+    /// For consistency reasons, this method can only be called on a [`snapshot`].
+    /// An error will be returned otherwise.
+    ///
+    /// [`snapshot`]: `crate::Config::snapshot`
     pub fn get_str(&self, name: &str) -> Result<&str, Error> {
         str::from_utf8(self.get_bytes(name)?)
             .map_err(|_| Error::from_str("configuration value is not valid utf8"))
@@ -215,7 +248,10 @@ impl Config {
 
     /// Get the value of a string config variable as a byte slice.
     ///
-    /// This method will return an error if this `Config` is not a snapshot.
+    /// For consistency reasons, this method can only be called on a [`snapshot`].
+    /// An error will be returned otherwise.
+    ///
+    /// [`snapshot`]: `crate::Config::snapshot`
     pub fn get_bytes(&self, name: &str) -> Result<&[u8], Error> {
         let mut ret = ptr::null();
         let name = CString::new(name)?;
@@ -280,15 +316,18 @@ impl Config {
     /// the variable name: the section and variable parts are lower-cased. The
     /// subsection is left unchanged.
     ///
+    /// Due to lifetime restrictions, the returned value does not implement
+    /// the standard [`Iterator`] trait. See [`ConfigEntries`] for more.
+    ///
     /// # Example
     ///
     /// ```
-    /// # #![allow(unstable)]
     /// use git2::Config;
     ///
     /// let cfg = Config::new().unwrap();
     ///
-    /// for entry in &cfg.entries(None).unwrap() {
+    /// let mut entries = cfg.entries(None).unwrap();
+    /// while let Some(entry) = entries.next() {
     ///     let entry = entry.unwrap();
     ///     println!("{} => {}", entry.name().unwrap(), entry.value().unwrap());
     /// }
@@ -317,6 +356,9 @@ impl Config {
     /// The regular expression is applied case-sensitively on the normalized form of
     /// the variable name: the section and variable parts are lower-cased. The
     /// subsection is left unchanged.
+    ///
+    /// Due to lifetime restrictions, the returned value does not implement
+    /// the standard [`Iterator`] trait. See [`ConfigEntries`] for more.
     pub fn multivar(&self, name: &str, regexp: Option<&str>) -> Result<ConfigEntries<'_>, Error> {
         let mut ret = ptr::null_mut();
         let name = CString::new(name)?;
@@ -332,7 +374,7 @@ impl Config {
     /// Open the global/XDG configuration file according to git's rules
     ///
     /// Git allows you to store your global configuration at `$HOME/.config` or
-    /// `$XDG_CONFIG_HOME/git/config`. For backwards compatability, the XDG file
+    /// `$XDG_CONFIG_HOME/git/config`. For backwards compatibility, the XDG file
     /// shouldn't be used unless the use has created it explicitly. With this
     /// function you'll open the correct one to write to.
     pub fn open_global(&mut self) -> Result<Config, Error> {
@@ -465,7 +507,7 @@ impl Config {
 impl Binding for Config {
     type Raw = *mut raw::git_config;
     unsafe fn from_raw(raw: *mut raw::git_config) -> Config {
-        Config { raw: raw }
+        Config { raw }
     }
     fn raw(&self) -> *mut raw::git_config {
         self.raw
@@ -534,7 +576,7 @@ impl<'cfg> Binding for ConfigEntry<'cfg> {
 
     unsafe fn from_raw(raw: *mut raw::git_config_entry) -> ConfigEntry<'cfg> {
         ConfigEntry {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
             owned: true,
         }
@@ -549,7 +591,8 @@ impl<'cfg> Binding for ConfigEntries<'cfg> {
 
     unsafe fn from_raw(raw: *mut raw::git_config_iterator) -> ConfigEntries<'cfg> {
         ConfigEntries {
-            raw: raw,
+            raw,
+            current: None,
             _marker: marker::PhantomData,
         }
     }
@@ -558,23 +601,32 @@ impl<'cfg> Binding for ConfigEntries<'cfg> {
     }
 }
 
-// entries are only valid until the iterator is freed, so this impl is for
-// `&'b T` instead of `T` to have a lifetime to tie them to.
-//
-// It's also not implemented for `&'b mut T` so we can have multiple entries
-// (ok).
-impl<'cfg, 'b> Iterator for &'b ConfigEntries<'cfg> {
-    type Item = Result<ConfigEntry<'b>, Error>;
-    fn next(&mut self) -> Option<Result<ConfigEntry<'b>, Error>> {
+impl<'cfg> ConfigEntries<'cfg> {
+    /// Advances the iterator and returns the next value.
+    ///
+    /// Returns `None` when iteration is finished.
+    pub fn next(&mut self) -> Option<Result<&ConfigEntry<'cfg>, Error>> {
         let mut raw = ptr::null_mut();
+        drop(self.current.take());
         unsafe {
             try_call_iter!(raw::git_config_next(&mut raw, self.raw));
-            Some(Ok(ConfigEntry {
+            let entry = ConfigEntry {
                 owned: false,
-                raw: raw,
+                raw,
                 _marker: marker::PhantomData,
-            }))
+            };
+            self.current = Some(entry);
+            Some(Ok(self.current.as_ref().unwrap()))
         }
+    }
+
+    /// Calls the given closure for each remaining entry in the iterator.
+    pub fn for_each<F: FnMut(&ConfigEntry<'cfg>)>(mut self, mut f: F) -> Result<(), Error> {
+        while let Some(entry) = self.next() {
+            let entry = entry?;
+            f(entry);
+        }
+        Ok(())
     }
 }
 
@@ -628,7 +680,8 @@ mod tests {
         assert_eq!(cfg.get_i64("foo.k3").unwrap(), 2);
         assert_eq!(cfg.get_str("foo.k4").unwrap(), "bar");
 
-        for entry in &cfg.entries(None).unwrap() {
+        let mut entries = cfg.entries(None).unwrap();
+        while let Some(entry) = entries.next() {
             let entry = entry.unwrap();
             entry.name();
             entry.value();
@@ -649,39 +702,42 @@ mod tests {
         cfg.set_multivar("foo.baz", "^$", "oki").unwrap();
 
         // `entries` filters by name
-        let mut entries: Vec<String> = cfg
-            .entries(Some("foo.bar"))
+        let mut entries: Vec<String> = Vec::new();
+        cfg.entries(Some("foo.bar"))
             .unwrap()
-            .into_iter()
-            .map(|entry| entry.unwrap().value().unwrap().into())
-            .collect();
+            .for_each(|entry| entries.push(entry.value().unwrap().to_string()))
+            .unwrap();
         entries.sort();
         assert_eq!(entries, ["baz", "quux", "qux"]);
 
         // which is the same as `multivar` without a regex
-        let mut multivals: Vec<String> = cfg
-            .multivar("foo.bar", None)
+        let mut multivals = Vec::new();
+        cfg.multivar("foo.bar", None)
             .unwrap()
-            .into_iter()
-            .map(|entry| entry.unwrap().value().unwrap().into())
-            .collect();
+            .for_each(|entry| multivals.push(entry.value().unwrap().to_string()))
+            .unwrap();
         multivals.sort();
         assert_eq!(multivals, entries);
 
         // yet _with_ a regex, `multivar` filters by value
-        let mut quxish: Vec<String> = cfg
-            .multivar("foo.bar", Some("qu.*x"))
+        let mut quxish = Vec::new();
+        cfg.multivar("foo.bar", Some("qu.*x"))
             .unwrap()
-            .into_iter()
-            .map(|entry| entry.unwrap().value().unwrap().into())
-            .collect();
+            .for_each(|entry| quxish.push(entry.value().unwrap().to_string()))
+            .unwrap();
         quxish.sort();
         assert_eq!(quxish, ["quux", "qux"]);
 
         cfg.remove_multivar("foo.bar", ".*").unwrap();
 
-        assert_eq!(cfg.entries(Some("foo.bar")).unwrap().count(), 0);
-        assert_eq!(cfg.multivar("foo.bar", None).unwrap().count(), 0);
+        let count = |entries: super::ConfigEntries<'_>| -> usize {
+            let mut c = 0;
+            entries.for_each(|_| c += 1).unwrap();
+            c
+        };
+
+        assert_eq!(count(cfg.entries(Some("foo.bar")).unwrap()), 0);
+        assert_eq!(count(cfg.multivar("foo.bar", None).unwrap()), 0);
     }
 
     #[test]

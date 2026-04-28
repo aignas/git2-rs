@@ -8,28 +8,34 @@ use std::str;
 use crate::object::CastOrPanic;
 use crate::util::{c_cmp_to_ordering, Binding};
 use crate::{
-    raw, Blob, Commit, Error, Object, ObjectType, Oid, ReferenceFormat, ReferenceType, Repository,
-    Tag, Tree,
+    call, raw, Blob, Commit, Error, Object, ObjectType, Oid, ReferenceFormat, ReferenceType,
+    Repository, Tag, Tree,
 };
 
 // Not in the public header files (yet?), but a hard limit used by libgit2
 // internally
 const GIT_REFNAME_MAX: usize = 1024;
 
-struct Refdb<'repo>(&'repo Repository);
+/// This is used to logically indicate that a [`raw::git_reference`] or
+/// [`raw::git_reference_iterator`] holds a reference to [`raw::git_refdb`].
+/// It is not necessary to have a wrapper like this in the
+/// [`marker::PhantomData`], since all that matters is that it is tied to the
+/// lifetime of the [`Repository`], but this helps distinguish the actual
+/// references involved.
+struct RefdbMarker<'repo>(#[allow(dead_code)] &'repo Repository);
 
 /// A structure to represent a git [reference][1].
 ///
 /// [1]: http://git-scm.com/book/en/Git-Internals-Git-References
 pub struct Reference<'repo> {
     raw: *mut raw::git_reference,
-    _marker: marker::PhantomData<Refdb<'repo>>,
+    _marker: marker::PhantomData<RefdbMarker<'repo>>,
 }
 
 /// An iterator over the references in a repository.
 pub struct References<'repo> {
     raw: *mut raw::git_reference_iterator,
-    _marker: marker::PhantomData<Refdb<'repo>>,
+    _marker: marker::PhantomData<RefdbMarker<'repo>>,
 }
 
 /// An iterator over the names of references in a repository.
@@ -61,8 +67,19 @@ impl<'repo> Reference<'repo> {
     /// [`Reference::normalize_name`]: struct.Reference#method.normalize_name
     pub fn is_valid_name(refname: &str) -> bool {
         crate::init();
-        let refname = CString::new(refname).unwrap();
-        unsafe { raw::git_reference_is_valid_name(refname.as_ptr()) == 1 }
+        let refname = match CString::new(refname) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let mut valid: libc::c_int = 0;
+        unsafe {
+            call::c_try(raw::git_reference_name_is_valid(
+                &mut valid,
+                refname.as_ptr(),
+            ))
+            .unwrap();
+        }
+        valid == 1
     }
 
     /// Normalize reference name and check validity.
@@ -361,6 +378,35 @@ impl<'repo> Reference<'repo> {
             Ok(Binding::from_raw(raw))
         }
     }
+
+    /// Create a new reference with the same name as the given reference but a
+    /// different symbolic target. The reference must be a symbolic reference,
+    /// otherwise this will fail.
+    ///
+    /// The new reference will be written to disk, overwriting the given
+    /// reference.
+    ///
+    /// The target name will be checked for validity. See
+    /// [`Repository::reference_symbolic`] for rules about valid names.
+    ///
+    /// The message for the reflog will be ignored if the reference does not
+    /// belong in the standard set (HEAD, branches and remote-tracking
+    /// branches) and it does not have a reflog.
+    pub fn symbolic_set_target(
+        &mut self,
+        target: &str,
+        reflog_msg: &str,
+    ) -> Result<Reference<'repo>, Error> {
+        let mut raw = ptr::null_mut();
+        let target = CString::new(target)?;
+        let msg = CString::new(reflog_msg)?;
+        unsafe {
+            try_call!(raw::git_reference_symbolic_set_target(
+                &mut raw, self.raw, target, msg
+            ));
+            Ok(Binding::from_raw(raw))
+        }
+    }
 }
 
 impl<'repo> PartialOrd for Reference<'repo> {
@@ -383,11 +429,22 @@ impl<'repo> PartialEq for Reference<'repo> {
 
 impl<'repo> Eq for Reference<'repo> {}
 
+impl<'repo> Clone for Reference<'repo> {
+    fn clone(&self) -> Reference<'repo> {
+        let mut raw = ptr::null_mut();
+        unsafe {
+            let rc = raw::git_reference_dup(&mut raw, self.raw);
+            assert_eq!(rc, 0);
+            Binding::from_raw(raw)
+        }
+    }
+}
+
 impl<'repo> Binding for Reference<'repo> {
     type Raw = *mut raw::git_reference;
     unsafe fn from_raw(raw: *mut raw::git_reference) -> Reference<'repo> {
         Reference {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -419,7 +476,7 @@ impl<'repo> Binding for References<'repo> {
     type Raw = *mut raw::git_reference_iterator;
     unsafe fn from_raw(raw: *mut raw::git_reference_iterator) -> References<'repo> {
         References {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -452,7 +509,10 @@ impl<'repo, 'references> Iterator for ReferenceNames<'repo, 'references> {
         unsafe {
             try_call_iter!(raw::git_reference_next_name(&mut out, self.inner.raw));
             let bytes = crate::opt_bytes(self, out).unwrap();
-            let s = str::from_utf8(bytes).unwrap();
+            let s = match str::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(e) => return Some(Err(e.into())),
+            };
             Some(Ok(mem::transmute::<&str, &'references str>(s)))
         }
     }
@@ -463,13 +523,20 @@ mod tests {
     use crate::{ObjectType, Reference, ReferenceType};
 
     #[test]
-    fn smoke() {
+    fn is_valid_name() {
         assert!(Reference::is_valid_name("refs/foo"));
         assert!(!Reference::is_valid_name("foo"));
+        assert!(Reference::is_valid_name("FOO_BAR"));
+
+        assert!(!Reference::is_valid_name("foo"));
+        assert!(!Reference::is_valid_name("_FOO_BAR"));
+
+        // Previously would panic, see #1218
+        assert!(!Reference::is_valid_name("ab\012"));
     }
 
     #[test]
-    fn smoke2() {
+    fn smoke() {
         let (_td, repo) = crate::test::repo_init();
         let mut head = repo.head().unwrap();
         assert!(head.is_branch());
@@ -496,6 +563,14 @@ mod tests {
         assert_eq!(head.shorthand(), Some("main"));
         assert!(head.resolve().unwrap() == head);
 
+        // In a block so that it gets dropped before proceeding and we can
+        // confirm that `head` still works
+        {
+            let cloned = head.clone();
+            assert_eq!(head.kind(), cloned.kind());
+            assert_eq!(head.target(), cloned.target());
+        }
+
         let mut tag1 = repo
             .reference("refs/tags/tag1", head.target().unwrap(), false, "test")
             .unwrap();
@@ -506,12 +581,41 @@ mod tests {
         assert_eq!(ObjectType::Commit, peeled_commit.kind().unwrap());
         assert_eq!(tag1.target().unwrap(), peeled_commit.id());
 
+        // In a block so that it gets dropped before proceeding and we can
+        // confirm that `tag1` still works
+        {
+            let cloned = tag1.clone();
+            assert_eq!(tag1.kind(), cloned.kind());
+            assert_eq!(tag1.target(), cloned.target());
+        }
+
         tag1.delete().unwrap();
 
         let mut sym1 = repo
             .reference_symbolic("refs/tags/tag1", "refs/heads/main", false, "test")
             .unwrap();
         assert_eq!(sym1.kind().unwrap(), ReferenceType::Symbolic);
+        let mut sym2 = repo
+            .reference_symbolic("refs/tags/tag2", "refs/heads/main", false, "test")
+            .unwrap()
+            .symbolic_set_target("refs/tags/tag1", "test")
+            .unwrap();
+        assert_eq!(sym2.kind().unwrap(), ReferenceType::Symbolic);
+        assert_eq!(sym2.symbolic_target().unwrap(), "refs/tags/tag1");
+
+        // In a block so that it gets dropped before proceeding and we can
+        // confirm that `sym1` and `sym2` still work
+        {
+            let cloned = sym1.clone();
+            assert_eq!(sym1.kind(), cloned.kind());
+            assert_eq!(sym1.target(), cloned.target());
+
+            let cloned = sym2.clone();
+            assert_eq!(sym2.kind(), cloned.kind());
+            assert_eq!(sym2.target(), cloned.target());
+        }
+
+        sym2.delete().unwrap();
         sym1.delete().unwrap();
 
         {

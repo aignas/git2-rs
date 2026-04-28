@@ -1,11 +1,11 @@
 [package]
 name = "libgit2-sys"
-version = "0.12.19+1.1.0"
+version = "0.18.3+1.9.2"
 authors = ["Josh Triplett <josh@joshtriplett.org>", "Alex Crichton <alex@alexcrichton.com>"]
 links = "git2"
 build = "build.rs"
 repository = "https://github.com/rust-lang/git2-rs"
-license = "MIT/Apache-2.0"
+license = "MIT OR Apache-2.0"
 description = "Native bindings to the libgit2 library"
 exclude = [
     "libgit2/ci/*",
@@ -14,7 +14,7 @@ exclude = [
     "libgit2/fuzzers/*",
     "libgit2/tests/*",
 ]
-edition = "2018"
+edition = "2021"
 
 [lib]
 name = "libgit2_sys"
@@ -22,23 +22,31 @@ path = "lib.rs"
 
 [dependencies]
 libc = "0.2"
-libssh2-sys = { version = "0.2.19", optional = true }
+libssh2-sys = { version = "0.3.0", optional = true }
 libz-sys = { version = "1.1.0", default-features = false, features = ["libc"] }
 
 [build-dependencies]
-pkg-config = "0.3.7"
+pkg-config = "0.3.15"
 cc = { version = "1.0.43", features = ['parallel'] }
 
 [target.'cfg(unix)'.dependencies]
-openssl-sys = { version = "0.9", optional = true }
+openssl-sys = { version = "0.9.45", optional = true }
 
 [features]
 ssh = ["libssh2-sys"]
 https = ["openssl-sys"]
-ssh_key_from_memory = []
-# Cargo does not support requiring features on an optional dependency without
-# requiring the dependency. Rather than introduce additional complexity, we
-# just require libssh2 when using zlib-ng-compat. This will require building
-# libssh2, but it will not add code to the final binary without the "ssh"
-# feature enabled.
-zlib-ng-compat = ["libz-sys/zlib-ng", "libssh2-sys/zlib-ng-compat"]
+vendored = []
+vendored-openssl = ["openssl-sys/vendored"]
+zlib-ng-compat = ["libz-sys/zlib-ng", "libssh2-sys?/zlib-ng-compat"]
+# Experimental SHA256 OID support,
+# reflecting upstream libgit2's GIT_EXPERIMENTAL_SHA256.
+#
+# This is an ABI-breaking change.
+# Future releases with this feature may introduce breakages without notice
+# Use at your own risk.
+#
+# Library authors:
+# DO NOT enable this feature by default in your dependencies.
+# Due to Cargo's additive features,
+# downstream users cannot deactivate it once enabled.
+unstable-sha256 = []

@@ -2,11 +2,20 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    let mut cfg = ctest::TestGenerator::new();
+    let mut cfg = ctest2::TestGenerator::new();
     if let Some(root) = env::var_os("DEP_GIT2_ROOT") {
         cfg.include(PathBuf::from(root).join("include"));
     }
+
+    // Enable the unstable-sha256 rust cfg
+    // so ctest2 sees the correct function signatures
+    if env::var("CARGO_FEATURE_UNSTABLE_SHA256").is_ok() {
+        cfg.cfg("feature", Some("unstable-sha256"));
+        cfg.define("GIT_EXPERIMENTAL_SHA256", Some("1"));
+    }
+
     cfg.header("git2.h")
+        .header("git2/sys/errors.h")
         .header("git2/sys/transport.h")
         .header("git2/sys/refs.h")
         .header("git2/sys/refdb_backend.h")
@@ -14,6 +23,8 @@ fn main() {
         .header("git2/sys/mempack.h")
         .header("git2/sys/repository.h")
         .header("git2/sys/cred.h")
+        .header("git2/sys/email.h")
+        .header("git2/sys/config.h")
         .header("git2/cred_helpers.h")
         .type_name(|s, _, _| s.to_string());
     cfg.field_name(|_, f| match f {
@@ -26,18 +37,15 @@ fn main() {
         // the real name of this field is ref but that is a reserved keyword
         (struct_ == "git_worktree_add_options" && f == "reference")
     });
-    cfg.skip_signededness(|s| {
-        match s {
-            s if s.ends_with("_cb") => true,
-            s if s.ends_with("_callback") => true,
-            "git_push_transfer_progress" | "git_push_negotiation" | "git_packbuilder_progress" => {
-                true
-            }
-            // TODO: fix this on the next major update of libgit2-sys
-            "git_diff_option_t" => true,
-            _ => false,
-        }
+    cfg.skip_signededness(|s| match s {
+        s if s.ends_with("_cb") => true,
+        s if s.ends_with("_callback") => true,
+        "git_push_transfer_progress" | "git_push_negotiation" | "git_packbuilder_progress" => true,
+        _ => false,
     });
+
+    // GIT_FILEMODE_BLOB_GROUP_WRITABLE is not a public const in libgit2
+    cfg.define("GIT_FILEMODE_BLOB_GROUP_WRITABLE", Some("0100664"));
 
     // not entirely sure why this is failing...
     cfg.skip_roundtrip(|t| t == "git_clone_options" || t == "git_submodule_update_options");

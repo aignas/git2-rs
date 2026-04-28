@@ -12,12 +12,12 @@
  * <http://creativecommons.org/publicdomain/zero/1.0/>.
  */
 
+use clap::Parser;
 use git2::Repository;
 use std::io::{self, Write};
 use std::str;
-use structopt::StructOpt;
 
-#[derive(StructOpt)]
+#[derive(Parser)]
 struct Args {
     arg_remote: Option<String>,
     arg_branch: Option<String>,
@@ -120,7 +120,7 @@ fn normal_merge(
     let mut idx = repo.merge_trees(&ancestor, &local_tree, &remote_tree, None)?;
 
     if idx.has_conflicts() {
-        println!("Merge conficts detected...");
+        println!("Merge conflicts detected...");
         repo.checkout_index(Some(&mut idx), None)?;
         return Ok(());
     }
@@ -152,7 +152,7 @@ fn do_merge<'a>(
     // 1. do a merge analysis
     let analysis = repo.merge_analysis(&[&fetch_commit])?;
 
-    // 2. Do the appopriate merge
+    // 2. Do the appropriate merge
     if analysis.0.is_fast_forward() {
         println!("Doing a fast forward");
         // do a fast forward
@@ -200,7 +200,7 @@ fn run(args: &Args) -> Result<(), git2::Error> {
 }
 
 fn main() {
-    let args = Args::from_args();
+    let args = Args::parse();
     match run(&args) {
         Ok(()) => {}
         Err(e) => println!("error: {}", e),

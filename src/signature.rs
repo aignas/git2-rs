@@ -1,4 +1,3 @@
-use libc;
 use std::ffi::CString;
 use std::fmt;
 use std::marker;
@@ -105,7 +104,7 @@ impl<'a> Binding for Signature<'a> {
     type Raw = *mut raw::git_signature;
     unsafe fn from_raw(raw: *mut raw::git_signature) -> Signature<'a> {
         Signature {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
             owned: true,
         }
@@ -119,7 +118,7 @@ impl<'a> Binding for Signature<'a> {
 /// of the given object.
 ///
 /// This function is unsafe as there is no guarantee that `raw` is valid for
-/// `'a` nor if it's a valid pointer.
+/// `'a` nor that it's a valid pointer.
 pub unsafe fn from_raw_const<'b, T>(_lt: &'b T, raw: *const raw::git_signature) -> Signature<'b> {
     Signature {
         raw: raw as *mut raw::git_signature,
@@ -157,6 +156,16 @@ impl<'a> fmt::Display for Signature<'a> {
         )
     }
 }
+
+impl PartialEq for Signature<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.when() == other.when()
+            && self.email_bytes() == other.email_bytes()
+            && self.name_bytes() == other.name_bytes()
+    }
+}
+
+impl Eq for Signature<'_> {}
 
 #[cfg(test)]
 mod tests {

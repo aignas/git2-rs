@@ -4,12 +4,12 @@
 //! to manage git repositories. The library itself is a work in progress and is
 //! likely lacking some bindings here and there, so be warned.
 //!
-//! [1]: https://libgit2.github.com/
+//! [1]: https://libgit2.org/
 //!
 //! The git2-rs library strives to be as close to libgit2 as possible, but also
 //! strives to make using libgit2 as safe as possible. All resource management
 //! is automatic as well as adding strong types to all interfaces (including
-//! `Result`)
+//! `Result`).
 //!
 //! ## Creating a `Repository`
 //!
@@ -65,7 +65,7 @@
 //! source `Repository`, to ensure that they do not outlive the repository
 //! itself.
 
-#![doc(html_root_url = "https://docs.rs/git2/0.13")]
+#![doc(html_root_url = "https://docs.rs/git2/0.21")]
 #![allow(trivial_numeric_casts, trivial_casts)]
 #![deny(missing_docs)]
 #![warn(rust_2018_idioms)]
@@ -88,58 +88,72 @@ pub use crate::buf::Buf;
 pub use crate::cherrypick::CherrypickOptions;
 pub use crate::commit::{Commit, Parents};
 pub use crate::config::{Config, ConfigEntries, ConfigEntry};
-pub use crate::cred::{Cred, CredentialHelper};
+pub use crate::cred::Cred;
+#[cfg(feature = "cred")]
+pub use crate::cred::CredentialHelper;
 pub use crate::describe::{Describe, DescribeFormatOptions, DescribeOptions};
 pub use crate::diff::{Deltas, Diff, DiffDelta, DiffFile, DiffOptions};
-pub use crate::diff::{DiffBinary, DiffBinaryFile, DiffBinaryKind};
+pub use crate::diff::{DiffBinary, DiffBinaryFile, DiffBinaryKind, DiffPatchidOptions};
 pub use crate::diff::{DiffFindOptions, DiffHunk, DiffLine, DiffLineType, DiffStats};
+pub use crate::email::{Email, EmailCreateOptions};
 pub use crate::error::Error;
 pub use crate::index::{
     Index, IndexConflict, IndexConflicts, IndexEntries, IndexEntry, IndexMatchedPath,
 };
-pub use crate::indexer::{IndexerProgress, Progress};
+pub use crate::indexer::{Indexer, IndexerProgress, Progress};
 pub use crate::mailmap::Mailmap;
 pub use crate::mempack::Mempack;
-pub use crate::merge::{AnnotatedCommit, MergeOptions};
-pub use crate::message::{message_prettify, DEFAULT_COMMENT_CHAR};
+pub use crate::merge::{
+    merge_file, AnnotatedCommit, MergeFileInput, MergeFileOptions, MergeFileResult, MergeOptions,
+};
+pub use crate::message::{
+    message_prettify, message_trailers_bytes, message_trailers_strs, MessageTrailersBytes,
+    MessageTrailersBytesIterator, MessageTrailersStrs, MessageTrailersStrsIterator,
+    DEFAULT_COMMENT_CHAR,
+};
 pub use crate::note::{Note, Notes};
 pub use crate::object::Object;
 pub use crate::odb::{Odb, OdbObject, OdbPackwriter, OdbReader, OdbWriter};
+pub use crate::oid::ObjectFormat;
 pub use crate::oid::Oid;
 pub use crate::packbuilder::{PackBuilder, PackBuilderStage};
 pub use crate::patch::Patch;
 pub use crate::pathspec::{Pathspec, PathspecFailedEntries, PathspecMatchList};
 pub use crate::pathspec::{PathspecDiffEntries, PathspecEntries};
 pub use crate::proxy_options::ProxyOptions;
+pub use crate::push_update::PushUpdate;
 pub use crate::rebase::{Rebase, RebaseOperation, RebaseOperationType, RebaseOptions};
+pub use crate::refdb::Refdb;
 pub use crate::reference::{Reference, ReferenceNames, References};
 pub use crate::reflog::{Reflog, ReflogEntry, ReflogIter};
 pub use crate::refspec::Refspec;
 pub use crate::remote::{
-    FetchOptions, PushOptions, Refspecs, Remote, RemoteConnection, RemoteHead,
+    FetchOptions, PushOptions, Refspecs, Remote, RemoteConnection, RemoteHead, RemoteRedirect,
 };
-pub use crate::remote_callbacks::{Credentials, RemoteCallbacks};
+pub use crate::remote_callbacks::{CertificateCheckStatus, Credentials, RemoteCallbacks};
 pub use crate::remote_callbacks::{TransportMessage, UpdateTips};
 pub use crate::repo::{Repository, RepositoryInitOptions};
 pub use crate::revert::RevertOptions;
 pub use crate::revspec::Revspec;
 pub use crate::revwalk::Revwalk;
 pub use crate::signature::Signature;
-pub use crate::stash::{StashApplyOptions, StashApplyProgressCb, StashCb};
+pub use crate::stash::{StashApplyOptions, StashApplyProgressCb, StashCb, StashSaveOptions};
 pub use crate::status::{StatusEntry, StatusIter, StatusOptions, StatusShow, Statuses};
 pub use crate::submodule::{Submodule, SubmoduleUpdateOptions};
 pub use crate::tag::Tag;
 pub use crate::time::{IndexTime, Time};
+pub use crate::tracing::{trace_set, TraceLevel};
 pub use crate::transaction::Transaction;
 pub use crate::tree::{Tree, TreeEntry, TreeIter, TreeWalkMode, TreeWalkResult};
 pub use crate::treebuilder::TreeBuilder;
-pub use crate::util::IntoCString;
+pub use crate::util::{Binding, IntoCString};
+pub use crate::version::Version;
 pub use crate::worktree::{Worktree, WorktreeAddOptions, WorktreeLockStatus, WorktreePruneOptions};
 
 // Create a convinience method on bitflag struct which checks the given flag
 macro_rules! is_bit_set {
     ($name:ident, $flag:expr) => {
-        #[allow(missing_docs)]
+        #[doc = concat!("Check if the ", stringify!($flag), " is set.")]
         pub fn $name(&self) -> bool {
             self.intersects($flag)
         }
@@ -208,6 +222,10 @@ pub enum ErrorCode {
     IndexDirty,
     /// Patch application failed
     ApplyFail,
+    /// The object is not owned by the current user
+    Owner,
+    /// Timeout
+    Timeout,
 }
 
 /// An enumeration of possible categories of things that can have
@@ -240,7 +258,7 @@ pub enum ErrorClass {
     Object,
     /// Network error
     Net,
-    /// Error manpulating a tag
+    /// Error manipulating a tag
     Tag,
     /// Invalid value in tree
     Tree,
@@ -248,7 +266,7 @@ pub enum ErrorClass {
     Indexer,
     /// Error from SSL
     Ssl,
-    /// Error involing submodules
+    /// Error involving submodules
     Submodule,
     /// Threading error
     Thread,
@@ -288,24 +306,35 @@ pub enum ErrorClass {
 
 /// A listing of the possible states that a repository can be in.
 #[derive(PartialEq, Eq, Clone, Debug, Copy)]
-#[allow(missing_docs)]
 pub enum RepositoryState {
+    /// No operation is currently in progress
     Clean,
+    /// A merge is currently in progress
     Merge,
+    /// A revert is currently in progress
     Revert,
+    /// A revert of multiple commits is currently in progress
     RevertSequence,
+    /// A cherry pick is currently in progress
     CherryPick,
+    /// A cherry pick of multiple commits is currently in progress
     CherryPickSequence,
+    /// A bisect is currently in progress
     Bisect,
+    /// A rebase is currently in progress
     Rebase,
+    /// An interactive rebase is currently in progress
     RebaseInteractive,
+    /// A rebase with a merge conflict is currently in progress
     RebaseMerge,
+    /// An apply operation is currently in progress
     ApplyMailbox,
+    /// A rebase or apply operation is currently in progress
     ApplyMailboxOrRebase,
 }
 
 /// An enumeration of the possible directions for a remote.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Direction {
     /// Data will be fetched (read) from this remote.
     Fetch,
@@ -315,7 +344,7 @@ pub enum Direction {
 
 /// An enumeration of the operations that can be performed for the `reset`
 /// method on a `Repository`.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ResetType {
     /// Move the head to the given commit.
     Soft,
@@ -340,7 +369,7 @@ pub enum ObjectType {
     Tag,
 }
 
-/// An enumeration of all possile kinds of references.
+/// An enumeration of all possible kinds of references.
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 pub enum ReferenceType {
     /// A reference which points at an object id.
@@ -375,6 +404,8 @@ pub enum ConfigLevel {
     Global,
     /// Repository specific config, e.g. $PWD/.git/config
     Local,
+    ///  Worktree specific configuration file, e.g. $GIT_DIR/config.worktree
+    Worktree,
     /// Application specific configuration file
     App,
     /// Highest level available
@@ -405,6 +436,7 @@ pub enum FileFavor {
 
 bitflags! {
     /// Orderings that may be specified for Revwalk iteration.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct Sort: u32 {
         /// Sort the repository contents in no particular ordering.
         ///
@@ -439,6 +471,7 @@ impl Sort {
 
 bitflags! {
     /// Types of credentials that can be requested by a credential callback.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct CredentialType: u32 {
         #[allow(missing_docs)]
         const USER_PASS_PLAINTEXT = raw::GIT_CREDTYPE_USERPASS_PLAINTEXT as u32;
@@ -475,6 +508,7 @@ impl Default for CredentialType {
 
 bitflags! {
     /// Flags for the `flags` field of an IndexEntry.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct IndexEntryFlag: u16 {
         /// Set when the `extended_flags` field is valid.
         const EXTENDED = raw::GIT_INDEX_ENTRY_EXTENDED as u16;
@@ -490,6 +524,7 @@ impl IndexEntryFlag {
 
 bitflags! {
     /// Flags for the `extended_flags` field of an IndexEntry.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct IndexEntryExtendedFlag: u16 {
         /// An "intent to add" entry from "git add -N"
         const INTENT_TO_ADD = raw::GIT_INDEX_ENTRY_INTENT_TO_ADD as u16;
@@ -509,10 +544,11 @@ impl IndexEntryExtendedFlag {
 
 bitflags! {
     /// Flags for APIs that add files matching pathspec
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct IndexAddOption: u32 {
-        #[allow(missing_docs)]
+        /// Adds files that are not ignored to the index
         const DEFAULT = raw::GIT_INDEX_ADD_DEFAULT as u32;
-        #[allow(missing_docs)]
+        /// Allows adding otherwise ignored files to the index
         const FORCE = raw::GIT_INDEX_ADD_FORCE as u32;
         #[allow(missing_docs)]
         const DISABLE_PATHSPEC_MATCH =
@@ -540,6 +576,7 @@ impl Default for IndexAddOption {
 
 bitflags! {
     /// Flags for `Repository::open_ext`
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct RepositoryOpenFlags: u32 {
         /// Only open the specified path; don't walk upward searching.
         const NO_SEARCH = raw::GIT_REPOSITORY_OPEN_NO_SEARCH as u32;
@@ -564,6 +601,7 @@ impl RepositoryOpenFlags {
 
 bitflags! {
     /// Flags for the return value of `Repository::revparse`
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct RevparseMode: u32 {
         /// The spec targeted a single object
         const SINGLE = raw::GIT_REVPARSE_SINGLE as u32;
@@ -582,6 +620,7 @@ impl RevparseMode {
 
 bitflags! {
     /// The results of `merge_analysis` indicating the merge opportunities.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct MergeAnalysis: u32 {
         /// No merge is possible.
         const ANALYSIS_NONE = raw::GIT_MERGE_ANALYSIS_NONE as u32;
@@ -612,6 +651,7 @@ impl MergeAnalysis {
 
 bitflags! {
     /// The user's stated preference for merges.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct MergePreference: u32 {
         /// No configuration was found that suggests a preferred behavior for
         /// merge.
@@ -629,6 +669,29 @@ impl MergePreference {
     is_bit_set!(is_none, MergePreference::NONE);
     is_bit_set!(is_no_fast_forward, MergePreference::NO_FAST_FORWARD);
     is_bit_set!(is_fastforward_only, MergePreference::FASTFORWARD_ONLY);
+}
+
+bitflags! {
+    /// Flags controlling the behavior of ODB lookup operations
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
+    pub struct OdbLookupFlags: u32 {
+        /// Don't call `git_odb_refresh` if the lookup fails. Useful when doing
+        /// a batch of lookup operations for objects that may legitimately not
+        /// exist. When using this flag, you may wish to manually call
+        /// `git_odb_refresh` before processing a batch of objects.
+        const NO_REFRESH = raw::GIT_ODB_LOOKUP_NO_REFRESH as u32;
+    }
+}
+
+bitflags! {
+    /// How to handle reference updates.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
+    pub struct RemoteUpdateFlags: u32 {
+       /// Write the fetch results to FETCH_HEAD.
+       const UPDATE_FETCHHEAD = raw::GIT_REMOTE_UPDATE_FETCHHEAD as u32;
+       /// Report unchanged tips in the update_tips callback.
+       const REPORT_UNCHANGED = raw::GIT_REMOTE_UPDATE_REPORT_UNCHANGED as u32;
+    }
 }
 
 #[cfg(test)]
@@ -658,6 +721,7 @@ mod config;
 mod cred;
 mod describe;
 mod diff;
+mod email;
 mod error;
 mod index;
 mod indexer;
@@ -673,7 +737,9 @@ mod packbuilder;
 mod patch;
 mod pathspec;
 mod proxy_options;
+mod push_update;
 mod rebase;
+mod refdb;
 mod reference;
 mod reflog;
 mod refspec;
@@ -690,9 +756,11 @@ mod submodule;
 mod tag;
 mod tagforeach;
 mod time;
+mod tracing;
 mod transaction;
 mod tree;
 mod treebuilder;
+mod version;
 mod worktree;
 
 fn init() {
@@ -823,6 +891,7 @@ fn openssl_env_init() {
     // OS X the OpenSSL binaries are stable enough that we can just rely on
     // dynamic linkage (plus they have some weird modifications to OpenSSL which
     // means we wouldn't want to link statically).
+    #[allow(deprecated)] // FIXME: use init_openssl_env_vars instead
     openssl_probe::init_ssl_cert_env_vars();
 }
 
@@ -928,6 +997,7 @@ impl ConfigLevel {
             raw::GIT_CONFIG_LEVEL_XDG => ConfigLevel::XDG,
             raw::GIT_CONFIG_LEVEL_GLOBAL => ConfigLevel::Global,
             raw::GIT_CONFIG_LEVEL_LOCAL => ConfigLevel::Local,
+            raw::GIT_CONFIG_LEVEL_WORKTREE => ConfigLevel::Worktree,
             raw::GIT_CONFIG_LEVEL_APP => ConfigLevel::App,
             raw::GIT_CONFIG_HIGHEST_LEVEL => ConfigLevel::Highest,
             n => panic!("unknown config level: {}", n),
@@ -972,6 +1042,7 @@ bitflags! {
     /// represents the status of file in the index relative to the HEAD, and the
     /// `STATUS_WT_*` set of flags represent the status of the file in the
     /// working directory relative to the index.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct Status: u32 {
         #[allow(missing_docs)]
         const CURRENT = raw::GIT_STATUS_CURRENT as u32;
@@ -997,6 +1068,8 @@ bitflags! {
         const WT_TYPECHANGE = raw::GIT_STATUS_WT_TYPECHANGE as u32;
         #[allow(missing_docs)]
         const WT_RENAMED = raw::GIT_STATUS_WT_RENAMED as u32;
+        #[allow(missing_docs)]
+        const WT_UNREADABLE = raw::GIT_STATUS_WT_UNREADABLE as u32;
 
         #[allow(missing_docs)]
         const IGNORED = raw::GIT_STATUS_IGNORED as u32;
@@ -1022,6 +1095,7 @@ impl Status {
 
 bitflags! {
     /// Mode options for RepositoryInitOptions
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct RepositoryInitMode: u32 {
         /// Use permissions configured by umask - the default
         const SHARED_UMASK = raw::GIT_REPOSITORY_INIT_SHARED_UMASK as u32;
@@ -1075,6 +1149,8 @@ pub enum FileMode {
     Tree,
     /// Blob
     Blob,
+    /// Group writable blob. Obsolete mode kept for compatibility reasons
+    BlobGroupWritable,
     /// Blob executable
     BlobExecutable,
     /// Link
@@ -1089,6 +1165,7 @@ impl From<FileMode> for i32 {
             FileMode::Unreadable => raw::GIT_FILEMODE_UNREADABLE as i32,
             FileMode::Tree => raw::GIT_FILEMODE_TREE as i32,
             FileMode::Blob => raw::GIT_FILEMODE_BLOB as i32,
+            FileMode::BlobGroupWritable => raw::GIT_FILEMODE_BLOB_GROUP_WRITABLE as i32,
             FileMode::BlobExecutable => raw::GIT_FILEMODE_BLOB_EXECUTABLE as i32,
             FileMode::Link => raw::GIT_FILEMODE_LINK as i32,
             FileMode::Commit => raw::GIT_FILEMODE_COMMIT as i32,
@@ -1102,6 +1179,7 @@ impl From<FileMode> for u32 {
             FileMode::Unreadable => raw::GIT_FILEMODE_UNREADABLE as u32,
             FileMode::Tree => raw::GIT_FILEMODE_TREE as u32,
             FileMode::Blob => raw::GIT_FILEMODE_BLOB as u32,
+            FileMode::BlobGroupWritable => raw::GIT_FILEMODE_BLOB_GROUP_WRITABLE as u32,
             FileMode::BlobExecutable => raw::GIT_FILEMODE_BLOB_EXECUTABLE as u32,
             FileMode::Link => raw::GIT_FILEMODE_LINK as u32,
             FileMode::Commit => raw::GIT_FILEMODE_COMMIT as u32,
@@ -1149,7 +1227,8 @@ bitflags! {
     ///
     /// Lastly, the following will only be returned for ignore "NONE".
     ///
-    /// * WD_UNTRACKED      - wd contains untracked files
+    /// * WD_UNTRACKED      - workdir contains untracked files
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct SubmoduleStatus: u32 {
         #[allow(missing_docs)]
         const IN_HEAD = raw::GIT_SUBMODULE_STATUS_IN_HEAD as u32;
@@ -1205,7 +1284,7 @@ impl SubmoduleStatus {
 /// These values represent settings for the `submodule.$name.ignore`
 /// configuration value which says how deeply to look at the working
 /// directory when getting the submodule status.
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SubmoduleIgnore {
     /// Use the submodule's configuration
     Unspecified,
@@ -1225,7 +1304,7 @@ pub enum SubmoduleIgnore {
 /// configuration value which says how to handle `git submodule update`
 /// for this submodule. The value is usually set in the ".gitmodules"
 /// file and copied to ".git/config" when the submodule is initialized.
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SubmoduleUpdate {
     /// The default; when a submodule is updated, checkout the new detached
     /// HEAD to the submodule directory.
@@ -1246,11 +1325,12 @@ pub enum SubmoduleUpdate {
 
 bitflags! {
     /// ...
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct PathspecFlags: u32 {
         /// Use the default pathspec matching configuration.
         const DEFAULT = raw::GIT_PATHSPEC_DEFAULT as u32;
         /// Force matching to ignore case, otherwise matching will use native
-        /// case sensitivity fo the platform filesystem.
+        /// case sensitivity of the platform filesystem.
         const IGNORE_CASE = raw::GIT_PATHSPEC_IGNORE_CASE as u32;
         /// Force case sensitive matches, otherwise match will use the native
         /// case sensitivity of the platform filesystem.
@@ -1291,6 +1371,7 @@ impl Default for PathspecFlags {
 
 bitflags! {
     /// Types of notifications emitted from checkouts.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct CheckoutNotificationType: u32 {
         /// Notification about a conflict.
         const CONFLICT = raw::GIT_CHECKOUT_NOTIFY_CONFLICT as u32;
@@ -1314,7 +1395,7 @@ impl CheckoutNotificationType {
 }
 
 /// Possible output formats for diff data
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DiffFormat {
     /// full git diff
     Patch,
@@ -1332,6 +1413,7 @@ pub enum DiffFormat {
 
 bitflags! {
     /// Formatting options for diff stats
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct DiffStatsFormat: raw::git_diff_stats_format_t {
         /// Don't generate any stats
         const NONE = raw::GIT_DIFF_STATS_NONE;
@@ -1356,6 +1438,7 @@ impl DiffStatsFormat {
 }
 
 /// Automatic tag following options.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum AutotagOption {
     /// Use the setting from the remote's configuration
     Unspecified,
@@ -1368,6 +1451,7 @@ pub enum AutotagOption {
 }
 
 /// Configuration for how pruning is done on a fetch
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FetchPrune {
     /// Use the setting from the configuration
     Unspecified,
@@ -1377,8 +1461,10 @@ pub enum FetchPrune {
     Off,
 }
 
-#[allow(missing_docs)]
-#[derive(Debug)]
+/// Current progress of an operation to apply a stashed change
+///
+/// See [`StashApplyOptions::progress_cb()`] for further details.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StashApplyProgress {
     /// None
     None,
@@ -1399,9 +1485,10 @@ pub enum StashApplyProgress {
 }
 
 bitflags! {
-    #[allow(missing_docs)]
+    /// Flags for applying stashed changes
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct StashApplyFlags: u32 {
-        #[allow(missing_docs)]
+        /// Default options if no additional customization is desired.
         const DEFAULT = raw::GIT_STASH_APPLY_DEFAULT as u32;
         /// Try to reinstate not only the working tree's changes,
         /// but also the index's changes.
@@ -1421,9 +1508,13 @@ impl Default for StashApplyFlags {
 }
 
 bitflags! {
-    #[allow(missing_docs)]
+    /// Flags for use when stashing changes
+    ///
+    /// See [`StashSaveOptions::flags()`] and [`Repository::stash_save()`] for
+    /// further details.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct StashFlags: u32 {
-        #[allow(missing_docs)]
+        /// Default options if no additional customization is desired.
         const DEFAULT = raw::GIT_STASH_DEFAULT as u32;
         /// All changes already added to the index are left intact in
         /// the working directory
@@ -1434,6 +1525,8 @@ bitflags! {
         /// All ignored files are also stashed and then cleaned up from
         /// the working directory
         const INCLUDE_IGNORED = raw::GIT_STASH_INCLUDE_IGNORED as u32;
+        /// All changes in the index and working directory are left intact
+        const KEEP_ALL = raw::GIT_STASH_KEEP_ALL as u32;
     }
 }
 
@@ -1452,6 +1545,7 @@ impl Default for StashFlags {
 
 bitflags! {
     #[allow(missing_docs)]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct AttrCheckFlags: u32 {
         /// Check the working directory, then the index.
         const FILE_THEN_INDEX = raw::GIT_ATTR_CHECK_FILE_THEN_INDEX as u32;
@@ -1471,7 +1565,8 @@ impl Default for AttrCheckFlags {
 }
 
 bitflags! {
-    #[allow(missing_docs)]
+    /// Flags for a [`DiffDelta`]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct DiffFlags: u32 {
         /// File(s) treated as binary data.
         const BINARY = raw::GIT_DIFF_FLAG_BINARY as u32;
@@ -1493,10 +1588,11 @@ impl DiffFlags {
 
 bitflags! {
     /// Options for [`Reference::normalize_name`].
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
     pub struct ReferenceFormat: u32 {
         /// No particular normalization.
         const NORMAL = raw::GIT_REFERENCE_FORMAT_NORMAL as u32;
-        /// Constrol whether one-level refname are accepted (i.e., refnames that
+        /// Control whether one-level refname are accepted (i.e., refnames that
         /// do not contain multiple `/`-separated components). Those are
         /// expected to be written only using uppercase letters and underscore
         /// (e.g. `HEAD`, `FETCH_HEAD`).
@@ -1539,8 +1635,76 @@ mod tests {
     #[test]
     fn convert_filemode() {
         assert_eq!(i32::from(FileMode::Blob), 0o100644);
+        assert_eq!(i32::from(FileMode::BlobGroupWritable), 0o100664);
         assert_eq!(i32::from(FileMode::BlobExecutable), 0o100755);
         assert_eq!(u32::from(FileMode::Blob), 0o100644);
+        assert_eq!(u32::from(FileMode::BlobGroupWritable), 0o100664);
         assert_eq!(u32::from(FileMode::BlobExecutable), 0o100755);
+    }
+
+    #[test]
+    fn bitflags_partial_eq() {
+        use super::{
+            AttrCheckFlags, CheckoutNotificationType, CredentialType, DiffFlags, DiffStatsFormat,
+            IndexAddOption, IndexEntryExtendedFlag, IndexEntryFlag, MergeAnalysis, MergePreference,
+            OdbLookupFlags, PathspecFlags, ReferenceFormat, RepositoryInitMode,
+            RepositoryOpenFlags, RevparseMode, Sort, StashApplyFlags, StashFlags, Status,
+            SubmoduleStatus,
+        };
+
+        assert_eq!(
+            AttrCheckFlags::FILE_THEN_INDEX,
+            AttrCheckFlags::FILE_THEN_INDEX
+        );
+        assert_eq!(
+            CheckoutNotificationType::CONFLICT,
+            CheckoutNotificationType::CONFLICT
+        );
+        assert_eq!(
+            CredentialType::USER_PASS_PLAINTEXT,
+            CredentialType::USER_PASS_PLAINTEXT
+        );
+        assert_eq!(DiffFlags::BINARY, DiffFlags::BINARY);
+        assert_eq!(
+            DiffStatsFormat::INCLUDE_SUMMARY,
+            DiffStatsFormat::INCLUDE_SUMMARY
+        );
+        assert_eq!(
+            IndexAddOption::CHECK_PATHSPEC,
+            IndexAddOption::CHECK_PATHSPEC
+        );
+        assert_eq!(
+            IndexEntryExtendedFlag::INTENT_TO_ADD,
+            IndexEntryExtendedFlag::INTENT_TO_ADD
+        );
+        assert_eq!(IndexEntryFlag::EXTENDED, IndexEntryFlag::EXTENDED);
+        assert_eq!(
+            MergeAnalysis::ANALYSIS_FASTFORWARD,
+            MergeAnalysis::ANALYSIS_FASTFORWARD
+        );
+        assert_eq!(
+            MergePreference::FASTFORWARD_ONLY,
+            MergePreference::FASTFORWARD_ONLY
+        );
+        assert_eq!(OdbLookupFlags::NO_REFRESH, OdbLookupFlags::NO_REFRESH);
+        assert_eq!(PathspecFlags::FAILURES_ONLY, PathspecFlags::FAILURES_ONLY);
+        assert_eq!(
+            ReferenceFormat::ALLOW_ONELEVEL,
+            ReferenceFormat::ALLOW_ONELEVEL
+        );
+        assert_eq!(
+            RepositoryInitMode::SHARED_ALL,
+            RepositoryInitMode::SHARED_ALL
+        );
+        assert_eq!(RepositoryOpenFlags::CROSS_FS, RepositoryOpenFlags::CROSS_FS);
+        assert_eq!(RevparseMode::RANGE, RevparseMode::RANGE);
+        assert_eq!(Sort::REVERSE, Sort::REVERSE);
+        assert_eq!(
+            StashApplyFlags::REINSTATE_INDEX,
+            StashApplyFlags::REINSTATE_INDEX
+        );
+        assert_eq!(StashFlags::INCLUDE_IGNORED, StashFlags::INCLUDE_IGNORED);
+        assert_eq!(Status::WT_MODIFIED, Status::WT_MODIFIED);
+        assert_eq!(SubmoduleStatus::WD_ADDED, SubmoduleStatus::WD_ADDED);
     }
 }

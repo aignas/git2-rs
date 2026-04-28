@@ -28,7 +28,7 @@ use crate::{CheckoutNotificationType, DiffFile, FileMode, Remote};
 ///     Cred::ssh_key(
 ///       username_from_url.unwrap(),
 ///       None,
-///       std::path::Path::new(&format!("{}/.ssh/id_rsa", env::var("HOME").unwrap())),
+///       Path::new(&format!("{}/.ssh/id_rsa", env::var("HOME").unwrap())),
 ///       None,
 ///     )
 ///   });
@@ -60,11 +60,19 @@ pub struct RepoBuilder<'cb> {
 
 /// Type of callback passed to `RepoBuilder::remote_create`.
 ///
-/// The second and third arguments are the remote's name and the remote's url.
+/// The second and third arguments are the remote's name and the remote's URL.
 pub type RemoteCreate<'cb> =
     dyn for<'a> FnMut(&'a Repository, &str, &str) -> Result<Remote<'a>, Error> + 'cb;
 
-/// A builder struct for git tree updates, for use with `git_tree_create_updated`.
+/// A builder struct for git tree updates.
+///
+/// Paths passed to `remove` and `upsert` can be multi-component paths, i.e. they
+/// may contain slashes.
+///
+/// This is a higher-level tree update facility.  There is also [`TreeBuilder`]
+/// which is lower-level (and operates only on one level of the tree at a time).
+///
+/// [`TreeBuilder`]: crate::TreeBuilder
 pub struct TreeUpdateBuilder {
     updates: Vec<raw::git_tree_update>,
     paths: Vec<CString>,
@@ -89,7 +97,7 @@ pub struct CheckoutBuilder<'cb> {
 
 /// Checkout progress notification callback.
 ///
-/// The first argument is the path for the notification, the next is the numver
+/// The first argument is the path for the notification, the next is the number
 /// of completed steps so far, and the final is the total number of steps.
 pub type Progress<'a> = dyn FnMut(Option<&Path>, usize, usize) + 'a;
 
@@ -121,10 +129,10 @@ pub enum CloneLocal {
     /// Auto-detect (default)
     ///
     /// Here libgit2 will bypass the git-aware transport for local paths, but
-    /// use a normal fetch for `file://` urls.
+    /// use a normal fetch for `file://` URLs.
     Auto = raw::GIT_CLONE_LOCAL_AUTO as isize,
 
-    /// Bypass the git-aware transport even for `file://` urls.
+    /// Bypass the git-aware transport even for `file://` URLs.
     Local = raw::GIT_CLONE_LOCAL as isize,
 
     /// Never bypass the git-aware transport
@@ -230,7 +238,7 @@ impl<'cb> RepoBuilder<'cb> {
 
     /// Clone a remote repository.
     ///
-    /// This will use the options configured so far to clone the specified url
+    /// This will use the options configured so far to clone the specified URL
     /// into the specified local path.
     pub fn clone(&mut self, url: &str, into: &Path) -> Result<Repository, Error> {
         let mut opts: raw::git_clone_options = unsafe { mem::zeroed() };
@@ -354,7 +362,7 @@ impl<'cb> CheckoutBuilder<'cb> {
     }
 
     /// Indicate that the checkout should be performed safely, allowing new
-    /// files to be created but not overwriting extisting files or changes.
+    /// files to be created but not overwriting existing files or changes.
     ///
     /// This is the default.
     pub fn safe(&mut self) -> &mut CheckoutBuilder<'cb> {
@@ -410,8 +418,8 @@ impl<'cb> CheckoutBuilder<'cb> {
         self.flag(raw::GIT_CHECKOUT_UPDATE_ONLY, update)
     }
 
-    /// Prevents checkout from writing the updated files' information to the
-    /// index.
+    /// When set to false, prevents checkout from writing the updated files'
+    /// information to the index.
     ///
     /// Defaults to true.
     pub fn update_index(&mut self, update: bool) -> &mut CheckoutBuilder<'cb> {
@@ -483,6 +491,12 @@ impl<'cb> CheckoutBuilder<'cb> {
         self.flag(raw::GIT_CHECKOUT_CONFLICT_STYLE_DIFF3, on)
     }
 
+    /// Treat paths specified in [`CheckoutBuilder::path`] as exact file paths
+    /// instead of as pathspecs.
+    pub fn disable_pathspec_match(&mut self, on: bool) -> &mut CheckoutBuilder<'cb> {
+        self.flag(raw::GIT_CHECKOUT_DISABLE_PATHSPEC_MATCH, on)
+    }
+
     /// Indicate whether to apply filters like CRLF conversion.
     pub fn disable_filters(&mut self, disable: bool) -> &mut CheckoutBuilder<'cb> {
         self.disable_filters = disable;
@@ -507,8 +521,13 @@ impl<'cb> CheckoutBuilder<'cb> {
 
     /// Add a path to be checked out.
     ///
+    /// The path is a [pathspec] pattern, unless
+    /// [`CheckoutBuilder::disable_pathspec_match`] is set.
+    ///
     /// If no paths are specified, then all files are checked out. Otherwise
     /// only these specified paths are checked out.
+    ///
+    /// [pathspec]: https://git-scm.com/docs/gitglossary.html#Documentation/gitglossary.txt-aiddefpathspecapathspec
     pub fn path<T: IntoCString>(&mut self, path: T) -> &mut CheckoutBuilder<'cb> {
         let path = util::cstring_to_repo_path(path).unwrap();
         self.path_ptrs.push(path.as_ptr());
@@ -680,6 +699,8 @@ extern "C" fn notify_cb(
     .unwrap_or(2)
 }
 
+unsafe impl Send for TreeUpdateBuilder {}
+
 impl Default for TreeUpdateBuilder {
     fn default() -> Self {
         Self::new()
@@ -702,9 +723,7 @@ impl TreeUpdateBuilder {
         self.paths.push(path);
         self.updates.push(raw::git_tree_update {
             action: raw::GIT_TREE_UPDATE_REMOVE,
-            id: raw::git_oid {
-                id: [0; raw::GIT_OID_RAWSZ],
-            },
+            id: crate::util::zeroed_raw_oid(),
             filemode: raw::GIT_FILEMODE_UNREADABLE,
             path: path_ptr,
         });
@@ -733,9 +752,7 @@ impl TreeUpdateBuilder {
     ///
     /// The baseline tree must exist in the specified repository.
     pub fn create_updated(&mut self, repo: &Repository, baseline: &Tree<'_>) -> Result<Oid, Error> {
-        let mut ret = raw::git_oid {
-            id: [0; raw::GIT_OID_RAWSZ],
-        };
+        let mut ret = crate::util::zeroed_raw_oid();
         unsafe {
             try_call!(raw::git_tree_create_updated(
                 &mut ret,

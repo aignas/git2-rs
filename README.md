@@ -2,24 +2,45 @@
 
 [Documentation](https://docs.rs/git2)
 
-libgit2 bindings for Rust
+libgit2 bindings for Rust.
 
-```toml
-[dependencies]
-git2 = "0.13"
+```
+cargo add git2
+```
+
+## Features
+
+By default, git2 includes support for working with local repositories, but does
+not include network support (e.g. cloning remote repositories). If you want to
+use features that require network support, you may need the `"https"` and/or
+`"ssh"` features. If you support user-provided repository URLs, you probably
+want to enable both.
+
+```
+cargo add git2 --features https,ssh
 ```
 
 ## Rust version requirements
 
 git2-rs works with stable Rust, and typically works with the most recent prior
-stable release as well. Check the MSRV job of [the CI script](.github/workflows/main.yml) to see the oldest
-version of Rust known to pass tests.
+stable release as well.
 
 ## Version of libgit2
 
-Currently this library requires libgit2 1.1.0. The source for libgit2 is
-included in the libgit2-sys crate so there's no need to pre-install the libgit2
-library, the libgit2-sys crate will figure that and/or build that for you.
+Currently this library requires libgit2 1.9.0 (or newer patch versions). The
+source for libgit2 is included in the libgit2-sys crate so there's no need to
+pre-install the libgit2 library, the libgit2-sys crate will figure that and/or
+build that for you. On the other hand, if an appropriate version of `libgit2`
+is present, `git2` will attempt to dynamically link it.
+
+To be more precise, the vendored `libgit2` is linked statically if two
+conditions both hold:
+
+- The environment variable `LIBGIT2_NO_VENDOR=1` is **not** set
+- **and** either a) The Cargo feature `vendored-libgit2` is set or b) an
+  appropriate version of `libgit2` cannot be found on the system.
+
+In particular, note that the environment variable overrides the Cargo feature.
 
 ## Building git2-rs
 
@@ -32,29 +53,23 @@ $ cargo build
 ### Automating Testing
 
 Running tests and handling all of the associated edge cases on every commit
-proves tedious very quickly.  To automate tests and handle proper stashing and
-unstashing of unstaged changes and thus avoid nasty surprises, use the
-pre-commit hook found [here][pre-commit-hook] and place it into the
-`.git/hooks/` with the name `pre-commit`.  You may need to add execution
-permissions with `chmod +x`.
+proves tedious very quickly.  You can use GitHub's automated CI to run the
+tests on your commit(s) if you do not run them locally.
 
+## Building on macOS 10.10+
 
-To skip tests on a simple commit or doc-fixes, use `git commit --no-verify`.
-
-## Building on OSX 10.10+
-
-If the `ssh` feature is enabled (and it is by default) then this library depends
+If the `ssh` feature is enabled then this library depends
 on libssh2 which depends on OpenSSL. To get OpenSSL working follow the
-[`openssl` crate's instructions](https://github.com/sfackler/rust-openssl#macos).
+[`openssl` crate's instructions](https://github.com/sfackler/rust-openssl/blob/master/openssl/src/lib.rs#L31).
 
 # License
 
 This project is licensed under either of
 
  * Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or
-   http://www.apache.org/licenses/LICENSE-2.0)
+   https://www.apache.org/licenses/LICENSE-2.0)
  * MIT license ([LICENSE-MIT](LICENSE-MIT) or
-   http://opensource.org/licenses/MIT)
+   https://opensource.org/licenses/MIT)
 
 at your option.
 

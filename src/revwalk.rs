@@ -12,7 +12,7 @@ pub struct Revwalk<'repo> {
     _marker: marker::PhantomData<&'repo Repository>,
 }
 
-/// A `Revwalk` with an assiciated "hide callback", see `with_hide_callback`
+/// A `Revwalk` with an associated "hide callback", see `with_hide_callback`
 pub struct RevwalkWithHideCb<'repo, 'cb, C>
 where
     C: FnMut(Oid) -> bool,
@@ -28,9 +28,10 @@ where
     panic::wrap(|| unsafe {
         let hide_cb = payload as *mut C;
         if (*hide_cb)(Oid::from_raw(commit_id)) {
-            return 1;
+            1
+        } else {
+            0
         }
-        return 0;
     })
     .unwrap_or(-1)
 }
@@ -80,7 +81,7 @@ impl<'repo> Revwalk<'repo> {
 
     /// Mark a commit to start traversal from.
     ///
-    /// The given OID must belong to a committish on the walked repository.
+    /// The given OID must belong to a commitish on the walked repository.
     ///
     /// The given commit will be used as one of the roots when starting the
     /// revision walk. At least one commit must be pushed onto the walker before
@@ -110,7 +111,7 @@ impl<'repo> Revwalk<'repo> {
     /// A leading 'refs/' is implied if not present as well as a trailing `/ \
     /// *` if the glob lacks '?', ' \ *' or '['.
     ///
-    /// Any references matching this glob which do not point to a committish
+    /// Any references matching this glob which do not point to a commitish
     /// will be ignored.
     pub fn push_glob(&mut self, glob: &str) -> Result<(), Error> {
         let glob = CString::new(glob)?;
@@ -135,7 +136,7 @@ impl<'repo> Revwalk<'repo> {
 
     /// Push the OID pointed to by a reference
     ///
-    /// The reference must point to a committish.
+    /// The reference must point to a commitish.
     pub fn push_ref(&mut self, reference: &str) -> Result<(), Error> {
         let reference = CString::new(reference)?;
         unsafe {
@@ -156,7 +157,7 @@ impl<'repo> Revwalk<'repo> {
     /// the walk.
     pub fn with_hide_callback<'cb, C>(
         self,
-        callback: &'cb C,
+        callback: &'cb mut C,
     ) -> Result<RevwalkWithHideCb<'repo, 'cb, C>, Error>
     where
         C: FnMut(Oid) -> bool,
@@ -169,7 +170,7 @@ impl<'repo> Revwalk<'repo> {
             raw::git_revwalk_add_hide_cb(
                 r.revwalk.raw(),
                 Some(revwalk_hide_cb::<C>),
-                callback as *const _ as *mut c_void,
+                callback as *mut _ as *mut c_void,
             );
         };
         Ok(r)
@@ -193,7 +194,7 @@ impl<'repo> Revwalk<'repo> {
     /// A leading 'refs/' is implied if not present as well as a trailing `/ \
     /// *` if the glob lacks '?', ' \ *' or '['.
     ///
-    /// Any references matching this glob which do not point to a committish
+    /// Any references matching this glob which do not point to a commitish
     /// will be ignored.
     pub fn hide_glob(&mut self, glob: &str) -> Result<(), Error> {
         let glob = CString::new(glob)?;
@@ -205,7 +206,7 @@ impl<'repo> Revwalk<'repo> {
 
     /// Hide the OID pointed to by a reference.
     ///
-    /// The reference must point to a committish.
+    /// The reference must point to a commitish.
     pub fn hide_ref(&mut self, reference: &str) -> Result<(), Error> {
         let reference = CString::new(reference)?;
         unsafe {
@@ -219,7 +220,7 @@ impl<'repo> Binding for Revwalk<'repo> {
     type Raw = *mut raw::git_revwalk;
     unsafe fn from_raw(raw: *mut raw::git_revwalk) -> Revwalk<'repo> {
         Revwalk {
-            raw: raw,
+            raw,
             _marker: marker::PhantomData,
         }
     }
@@ -237,9 +238,7 @@ impl<'repo> Drop for Revwalk<'repo> {
 impl<'repo> Iterator for Revwalk<'repo> {
     type Item = Result<Oid, Error>;
     fn next(&mut self) -> Option<Result<Oid, Error>> {
-        let mut out: raw::git_oid = raw::git_oid {
-            id: [0; raw::GIT_OID_RAWSZ],
-        };
+        let mut out: raw::git_oid = crate::util::zeroed_raw_oid();
         unsafe {
             try_call_iter!(raw::git_revwalk_next(&mut out, self.raw()));
             Some(Ok(Binding::from_raw(&out as *const _)))
@@ -303,8 +302,8 @@ mod tests {
         walk.reset().unwrap();
         walk.push_head().unwrap();
 
-        let hide_cb = |oid| oid == target;
-        let mut walk = walk.with_hide_callback(&hide_cb).unwrap();
+        let mut hide_cb = |oid| oid == target;
+        let mut walk = walk.with_hide_callback(&mut hide_cb).unwrap();
 
         assert_eq!(walk.by_ref().count(), 0);
 

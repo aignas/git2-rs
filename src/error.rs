@@ -1,9 +1,9 @@
 use libc::c_int;
 use std::env::JoinPathsError;
 use std::error;
-use std::ffi::{CStr, NulError};
+use std::ffi::{CStr, CString, NulError};
 use std::fmt;
-use std::str;
+use std::str::{self, Utf8Error};
 
 use crate::{raw, ErrorClass, ErrorCode};
 
@@ -12,13 +12,13 @@ use crate::{raw, ErrorClass, ErrorCode};
 pub struct Error {
     code: c_int,
     klass: c_int,
-    message: String,
+    message: Box<str>,
 }
 
 impl Error {
     /// Creates a new error.
     ///
-    /// This is mainly intended for implementors of custom transports or
+    /// This is mainly intended for implementers of custom transports or
     /// database backends, where it is desirable to propagate an [`Error`]
     /// through `libgit2`.
     pub fn new<S: AsRef<str>>(code: ErrorCode, class: ErrorClass, message: S) -> Self {
@@ -32,12 +32,7 @@ impl Error {
     ///
     /// The `code` argument typically comes from the return value of a function
     /// call. This code will later be returned from the `code` function.
-    ///
-    /// Historically this function returned `Some` or `None` based on the return
-    /// value of `git_error_last` but nowadays it always returns `Some` so it's
-    /// safe to unwrap the return value. This API will change in the next major
-    /// version.
-    pub fn last_error(code: c_int) -> Option<Error> {
+    pub fn last_error(code: c_int) -> Error {
         crate::init();
         unsafe {
             // Note that whenever libgit2 returns an error any negative value
@@ -64,17 +59,17 @@ impl Error {
                 Error::from_raw(code, ptr)
             };
             raw::git_error_clear();
-            Some(err)
+            err
         }
     }
 
     unsafe fn from_raw(code: c_int, ptr: *const raw::git_error) -> Error {
-        let msg = CStr::from_ptr((*ptr).message as *const _).to_bytes();
-        let msg = String::from_utf8_lossy(msg).into_owned();
+        let message = CStr::from_ptr((*ptr).message as *const _).to_bytes();
+        let message = String::from_utf8_lossy(message).into_owned().into();
         Error {
-            code: code,
+            code,
             klass: (*ptr).klass,
-            message: msg,
+            message,
         }
     }
 
@@ -86,7 +81,7 @@ impl Error {
         Error {
             code: raw::GIT_ERROR as c_int,
             klass: raw::GIT_ERROR_NONE as c_int,
-            message: s.to_string(),
+            message: s.into(),
         }
     }
 
@@ -127,13 +122,15 @@ impl Error {
             raw::GIT_EMISMATCH => super::ErrorCode::HashsumMismatch,
             raw::GIT_EINDEXDIRTY => super::ErrorCode::IndexDirty,
             raw::GIT_EAPPLYFAIL => super::ErrorCode::ApplyFail,
+            raw::GIT_EOWNER => super::ErrorCode::Owner,
+            raw::GIT_TIMEOUT => super::ErrorCode::Timeout,
             _ => super::ErrorCode::GenericError,
         }
     }
 
     /// Modify the error code associated with this error.
     ///
-    /// This is mainly intended to be used by implementors of custom transports
+    /// This is mainly intended to be used by implementers of custom transports
     /// or database backends, and should be used with care.
     pub fn set_code(&mut self, code: ErrorCode) {
         self.code = match code {
@@ -163,6 +160,8 @@ impl Error {
             ErrorCode::HashsumMismatch => raw::GIT_EMISMATCH,
             ErrorCode::IndexDirty => raw::GIT_EINDEXDIRTY,
             ErrorCode::ApplyFail => raw::GIT_EAPPLYFAIL,
+            ErrorCode::Owner => raw::GIT_EOWNER,
+            ErrorCode::Timeout => raw::GIT_TIMEOUT,
         };
     }
 
@@ -214,7 +213,7 @@ impl Error {
 
     /// Modify the error class associated with this error.
     ///
-    /// This is mainly intended to be used by implementors of custom transports
+    /// This is mainly intended to be used by implementers of custom transports
     /// or database backends, and should be used with care.
     pub fn set_class(&mut self, class: ErrorClass) {
         self.klass = match class {
@@ -287,12 +286,19 @@ impl Error {
             GIT_EEOF,
             GIT_EINVALID,
             GIT_EUNCOMMITTED,
+            GIT_EDIRECTORY,
+            GIT_EMERGECONFLICT,
             GIT_PASSTHROUGH,
             GIT_ITEROVER,
             GIT_RETRY,
             GIT_EMISMATCH,
             GIT_EINDEXDIRTY,
             GIT_EAPPLYFAIL,
+            GIT_EOWNER,
+            GIT_TIMEOUT,
+            GIT_EUNCHANGED,
+            GIT_ENOTSUPPORTED,
+            GIT_EREADONLY,
         )
     }
 
@@ -347,6 +353,17 @@ impl Error {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    /// A low-level convenience to call [`raw::git_error_set_str`] with the
+    /// information from this error.
+    ///
+    /// Returns the [`Error::raw_code`] value of this error, which is often
+    /// needed from a C callback.
+    pub(crate) unsafe fn raw_set_git_error(&self) -> raw::git_error_code {
+        let s = CString::new(self.message()).unwrap();
+        raw::git_error_set_str(self.class() as c_int, s.as_ptr());
+        self.raw_code()
+    }
 }
 
 impl error::Error for Error {}
@@ -372,6 +389,12 @@ impl From<NulError> for Error {
             "data contained a nul byte that could not be \
              represented as a string",
         )
+    }
+}
+
+impl From<Utf8Error> for Error {
+    fn from(e: Utf8Error) -> Error {
+        Error::from_str(&e.to_string())
     }
 }
 
